@@ -1,0 +1,19 @@
+[Unit]
+Description=NexusGate Sing-box Lightweight Control Panel
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment="MALLOC_ARENA_MAX=2"
+EnvironmentFile=-/etc/nexusgate/nexusgate.env
+WorkingDirectory=/opt/nexusgate
+ExecStart=/usr/bin/node --expose-gc --max-semi-space-size=8 --max-old-space-size=256 /opt/nexusgate/server.js
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
