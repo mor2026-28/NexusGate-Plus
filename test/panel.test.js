@@ -1437,7 +1437,7 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
     return el;
   };
 
-  const navPages = ['overview', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings'];
+  const navPages = ['overview', 'cluster', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings'];
   const navButtons = navPages.map((p, i) => makeEl('button', `nav-${p}`, { className: i === 0 ? 'active' : '', dataset: { page: p } }));
   const elementsById = new Map([
     ['login', makeEl('div', 'login', { className: 'login-shell hidden' })],
@@ -1568,6 +1568,7 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
   // Now simulate clicking every single sidebar button via the document click listener and verify instant switching!
   const expectedTitles = {
     overview: '系统与内核总览',
+    cluster: '中转与落地集群 (容灾)',
     inbounds: '入站节点管理',
     routing: '路由规则 (转发)',
     outbounds: '出站规则 (中转)',
@@ -1587,6 +1588,23 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
     assert.ok(btn.classList.contains('active'), `Sidebar button [${page}] must have .active class`);
     assert.ok(elementsById.get('content').innerHTML.length > 100, `Content for [${page}] must be non-empty`);
   }
+
+  // Test clicking 'add-cluster-node' button in DOM -> must open openClusterNodeModal
+  const addRelayBtn = makeEl('button', 'btn-add-relay', { dataset: { action: 'add-cluster-node', role: 'relay' } });
+  for (const clickHandler of doc.listeners.click || []) {
+    await clickHandler({ target: addRelayBtn });
+  }
+  assert.equal(elementsById.get('modal').open, true, 'Clicking add-cluster-node must open modal');
+  assert.ok(elementsById.get('modal-body').innerHTML.includes('cluster-node-form'), 'Cluster node modal must contain #cluster-node-form');
+  sandbox.closeModal();
+
+  const addExitBtn = makeEl('button', 'btn-add-exit', { dataset: { action: 'add-cluster-node', role: 'exit' } });
+  for (const clickHandler of doc.listeners.click || []) {
+    await clickHandler({ target: addExitBtn });
+  }
+  assert.equal(elementsById.get('modal').open, true, 'Clicking add-cluster-node (exit) must open modal');
+  assert.ok(!elementsById.get('modal-body').innerHTML.includes('exitPort'), 'Exit server modal must NOT contain forced exitPort SS field');
+  sandbox.closeModal();
 
   // Also test opening Inbound, Outbound, Rule, and Aggregate QR modals in the VM without any runtime errors
   await sandbox.openInboundModal();
@@ -2133,4 +2151,135 @@ test('21. NexusGate Plus v1.0.0 Cluster Architecture: Multi-Relay Independent Do
   });
   assert.equal(fbRes.status, 200);
   assert.equal(fbRes.json.ok, true);
+});
+
+
+test('22. End-to-End Multi-Relay & Exit Simulation: Create Nodes on Exit Servers, Multi-Backup (3x-ui + X-Panel + NexusGate) Isolation across Domains/Ports/Certs, and Frontend Modal E2E', async () => {
+  // 1. Add a pure Exit server WITHOUT exitPort -> verify NO dummy 28388 SS outbound is force-created
+  const exRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: '英国伦敦纯落地机 E1',
+      role: 'exit',
+      host: '185.199.108.55'
+    })
+  });
+  assert.equal(exRes.status, 201);
+  const ukExitNode = exRes.json.node;
+  const dummyOut = exRes.json.outbounds.find((o) => o.exitNodeId === ukExitNode.id && !o.linkedInboundId);
+  assert.equal(dummyOut, undefined, 'Adding an Exit server must NOT force-create a dummy SS outbound before the user builds a node on it');
+
+  // 2. Now create an SS-2022 node on `ukExitNode` in Inbounds Management -> verify it automatically appears in Outbounds!
+  const createExitInb = await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify({
+      nodeId: ukExitNode.id,
+      remark: '英国落地SS节点-51888',
+      protocol: 'shadowsocks',
+      port: 51888,
+      method: '2022-blake3-aes-128-gcm',
+      security: 'none'
+    })
+  });
+  assert.equal(createExitInb.status, 201);
+  const exitInbound = createExitInb.json.inbound;
+  assert.equal(exitInbound.nodeId, ukExitNode.id);
+
+  // Check /api/outbounds -> must contain the auto-synced outbound for `exitInbound`!
+  const outListRes = await req('/SecPath16Chars99/api/outbounds');
+  assert.equal(outListRes.status, 200);
+  const autoSyncedOut = outListRes.json.outbounds.find((o) => o.linkedInboundId === exitInbound.id);
+  assert.ok(autoSyncedOut, 'Creating an inbound on an Exit server must automatically register it as a selectable Outbound');
+  assert.equal(autoSyncedOut.server, '185.199.108.55');
+  assert.equal(autoSyncedOut.port, 51888);
+  assert.ok(autoSyncedOut.remark.includes('英国伦敦纯落地机 E1'));
+
+  // Verify ukExitNode's compiled Sing-box config has the inbound on 51888, and does NOT include `autoSyncedOut` as a self-loop outbound
+  const ukCfgRes = await req(`/SecPath16Chars99/api/cluster/nodes/${ukExitNode.id}/config`);
+  assert.equal(ukCfgRes.status, 200);
+  assert.ok(ukCfgRes.json.singboxConfig.inbounds.some((i) => i.listen_port === 51888), 'Exit node config must listen on 51888');
+  assert.ok(!ukCfgRes.json.singboxConfig.outbounds.some((o) => o.tag === autoSyncedOut.tag), 'Exit node config must not self-loop to its own outbound');
+
+  // 3. Test importing a native NexusGate backup JSON into a newly created Relay Server 3 (sg1.vip.com) with port 443 (same port 443 as HK & JP!)
+  const ngBackupPayload = {
+    version: 5.1,
+    settings: { webDomain: 'sg1.vip.com' },
+    inbounds: [
+      {
+        tag: 'inbound-443',
+        remark: 'SG-Native-NexusGate-Node',
+        protocol: 'vless',
+        port: 443,
+        security: 'reality',
+        transport: 'tcp',
+        flow: 'xtls-rprx-vision',
+        outboundTag: 'shared-exit-ss',
+        reality: {
+          serverName: 'tesla.com',
+          target: 'www.tesla.com:443',
+          privateKey: 'demoPrivKey',
+          publicKey: 'demoPubKey',
+          shortIds: ['1a2b3c4d'],
+          fingerprint: 'chrome'
+        },
+        clients: [
+          { id: '99999999-2222-4333-8444-888888888888', email: 'sg_customer_c', subId: 'sub_sg_cust_c_99999', enable: true }
+        ]
+      }
+    ],
+    outbounds: [
+      {
+        tag: 'shared-exit-ss',
+        type: 'shadowsocks',
+        remark: 'US Shared Exit',
+        server: '198.51.100.88',
+        port: 38388,
+        method: '2022-blake3-aes-128-gcm',
+        password: 'testpassword123456'
+      }
+    ],
+    routing: {
+      final: 'direct',
+      rules: [
+        { action: 'route', inbound: ['inbound-443'], outbound: 'shared-exit-ss', enabled: true }
+      ]
+    }
+  };
+
+  const migSg = await req('/SecPath16Chars99/api/migrate/3xui?mode=merge&targetNodeId=__create__&nodeName=新加坡CN2中转03&nodeDomain=sg1.vip.com&nodeIp=154.22.89.102&deduplicateExits=true', {
+    method: 'POST',
+    body: JSON.stringify({ jsonPayload: ngBackupPayload })
+  });
+  assert.equal(migSg.status, 200);
+  assert.equal(migSg.json.record.inboundsCount, 1);
+  assert.equal(migSg.json.record.targetDomain, 'sg1.vip.com');
+
+  // Verify SG customer subscription uses sg1.vip.com:443, while HK & JP customers STILL use hk1.vip.com:443 & jp1.vip.com:443!
+  const subSg = await req('/sub/sub_sg_cust_c_99999?format=raw');
+  assert.equal(subSg.status, 200);
+  assert.ok(subSg.text.includes('@sg1.vip.com:443'), `SG customer link must use sg1.vip.com:443, got: ${subSg.text}`);
+
+  const subHkAgain = await req('/sub/sub_hk_cust_a_12345?format=raw');
+  assert.ok(subHkAgain.text.includes('@hk1.vip.com:443'), 'HK customer link must remain isolated on hk1.vip.com:443');
+
+  const subJpAgain = await req('/sub/sub_jp_cust_b_12345?format=raw');
+  assert.ok(subJpAgain.text.includes('@jp1.vip.com:443'), 'JP customer link must remain isolated on jp1.vip.com:443');
+
+  // 4. Verify Local Master's Sing-box config (/api/singbox/config) does NOT bind remote nodes' port 443 multiple times
+  const localSbCfg = await req('/SecPath16Chars99/api/singbox/config');
+  assert.equal(localSbCfg.status, 200);
+  const localPorts = localSbCfg.json.config.inbounds.map((i) => i.listen_port);
+  const uniqueLocalPorts = new Set(localPorts);
+  assert.equal(localPorts.length, uniqueLocalPorts.size, 'Local Master sing-box config must never have duplicate listen_port from remote Relay nodes');
+
+  // 5. Test 1-click inline outbound switching API (POST /api/inbounds/:id/outbound)
+  const allInbs = (await req('/SecPath16Chars99/api/inbounds')).json.inbounds;
+  const sgInb = allInbs.find((i) => i.remark === 'SG-Native-NexusGate-Node');
+  assert.ok(sgInb, 'Migrated SG inbound must exist');
+  const switchOutRes = await req(`/SecPath16Chars99/api/inbounds/${sgInb.id}/outbound`, {
+    method: 'POST',
+    body: JSON.stringify({ outboundTag: autoSyncedOut.tag })
+  });
+  assert.equal(switchOutRes.status, 200);
+  assert.equal(switchOutRes.json.inbound.outboundTag, autoSyncedOut.tag);
 });

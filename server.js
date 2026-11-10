@@ -1309,12 +1309,19 @@ async function handleRequest(req, res) {
         return sendError(res, 400, `端口 ${inbound.port} 已被入站 [${portConflict.remark}] 占用`);
       }
       store.transact((st) => {
+        const effNodeId = inbound.nodeId || 'node_local';
+        const tagConflictOtherNode = st.inbounds.some((x) => (x.nodeId || 'node_local') !== effNodeId && x.tag === inbound.tag);
+        if (tagConflictOtherNode) {
+          const prefix = effNodeId.replace(/^node_/, '');
+          inbound.tag = `${prefix}-${inbound.tag}`;
+        }
         st.inbounds.unshift(inbound);
         syncInboundRelayToRoutingRule(st, inbound);
+        syncExitNodeOutbounds(st);
         store.addAudit(session.username, 'create_inbound', `${inbound.remark} (${inbound.protocol}:${inbound.port})`);
       });
       autoApplyIfEnabled([inbound.port]);
-      return sendJson(res, 201, { inbound: enrichInboundWithLinks(inbound, reqHostHeader) });
+      return sendJson(res, 201, { inbound: enrichInboundWithLinks(inbound, reqHostHeader), outbounds: store.state.outbounds });
     }
 
     const inbMatch = route('/api/inbounds/:id', pathname);
@@ -1341,12 +1348,19 @@ async function handleRequest(req, res) {
             }
           }
         }
+        const effNodeId = updated.nodeId || 'node_local';
+        const tagConflictOtherNode = st.inbounds.some((x) => x.id !== updated.id && (x.nodeId || 'node_local') !== effNodeId && x.tag === updated.tag);
+        if (tagConflictOtherNode) {
+          const prefix = effNodeId.replace(/^node_/, '');
+          updated.tag = `${prefix}-${updated.tag}`;
+        }
         syncInboundRelayToRoutingRule(st, updated);
+        syncExitNodeOutbounds(st);
         store.addAudit(session.username, 'update_inbound', `${updated.remark} (${updated.protocol}:${updated.port})`);
       });
       autoApplyIfEnabled([updated.port]);
       setImmediate(() => { singbox.pollConnectionsAndEnforceLimits().catch(() => {}); });
-      return sendJson(res, 200, { inbound: enrichInboundWithLinks(updated, reqHostHeader) });
+      return sendJson(res, 200, { inbound: enrichInboundWithLinks(updated, reqHostHeader), outbounds: store.state.outbounds });
     }
 
     if (inbMatch && method === 'DELETE') {
@@ -1356,6 +1370,7 @@ async function handleRequest(req, res) {
       store.transact((st) => {
         st.inbounds = st.inbounds.filter((x) => x.id !== inbMatch.id);
         st.routing.rules = (st.routing.rules || []).filter((r) => !(Array.isArray(r.inbound) && r.inbound.length === 1 && r.inbound[0] === existing.tag));
+        syncExitNodeOutbounds(st);
         store.addAudit(session.username, 'delete_inbound', `${existing.remark} (:${existing.port})`);
       });
       autoApplyIfEnabled();
@@ -1385,6 +1400,7 @@ async function handleRequest(req, res) {
         existing.enable = !existing.enable;
         if (existing.enable) delete existing.disabledReason;
         else singbox.clearInboundLeases(existing.tag);
+        syncExitNodeOutbounds(store.state);
         store.addAudit(session.username, 'toggle_inbound', `${existing.remark} -> ${existing.enable ? '启用' : '停用'}`);
       });
       autoApplyIfEnabled();
@@ -2125,7 +2141,7 @@ async function handleRequest(req, res) {
           cfRecordName: String(body.cfRecordName || domain || '').trim(),
           cfProxied: Boolean(body.cfProxied),
           exitConfig: {
-            enabled: role === 'exit' || role === 'hybrid' || Boolean(body.exitConfig?.enabled),
+            enabled: Boolean(body.exitPort || body.exitConfig?.enabled),
             protocol: 'shadowsocks',
             port: exitPort,
             method: exitMethod,
