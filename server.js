@@ -72,7 +72,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.4';
+const VERSION = '1.0.5';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -335,7 +335,13 @@ function syncRoutingRulesToInbounds(st) {
 }
 
 function applyMasterRestore(data, certFiles = new Map(), options = {}) {
-  const { restorePanelSettings = true, actor = 'admin', certRoot = '' } = options;
+  const {
+    restorePanelSettings = true,
+    actor = 'admin',
+    certRoot = process.env.NG_CERT_RESTORE_DIR || '',
+    isStandbySync = false,
+    primaryUrl = ''
+  } = options;
   if (!data || !Array.isArray(data.inbounds) || !Array.isArray(data.outbounds)) {
     const err = new Error('备份文件结构无效（缺少 inbounds 或 outbounds）');
     err.statusCode = 400;
@@ -376,7 +382,21 @@ function applyMasterRestore(data, certFiles = new Map(), options = {}) {
         if (ds.trafficResetDay !== undefined) st.settings.trafficResetDay = Number(ds.trafficResetDay || 0);
         if (ds.singboxLogLevel) st.settings.singboxLogLevel = ds.singboxLogLevel;
         if (ds.autoApplyConfig !== undefined) st.settings.autoApplyConfig = Boolean(ds.autoApplyConfig);
-        if (!st.settings.publicIPv4 && ds.publicIPv4) st.settings.publicIPv4 = ds.publicIPv4;
+        if (ds.masterHaSecret !== undefined) st.settings.masterHaSecret = String(ds.masterHaSecret || '').trim();
+        if (ds.masterHaSyncMode) st.settings.masterHaSyncMode = ds.masterHaSyncMode;
+        if (isStandbySync) {
+          st.settings.masterHaRole = 'standby';
+          if (primaryUrl) st.settings.primaryMasterUrl = String(primaryUrl).trim();
+          st.settings.lastMasterSyncAt = new Date().toISOString();
+          st.settings.lastMasterSyncStatus = 'ok';
+        } else {
+          if (ds.masterHaRole) st.settings.masterHaRole = ds.masterHaRole;
+          if (ds.standbyMasterUrl !== undefined) st.settings.standbyMasterUrl = String(ds.standbyMasterUrl || '').trim();
+          if (ds.primaryMasterUrl !== undefined) st.settings.primaryMasterUrl = String(ds.primaryMasterUrl || '').trim();
+          if (ds.masterAutoTakeover !== undefined) st.settings.masterAutoTakeover = Boolean(ds.masterAutoTakeover);
+          if (ds.masterAutoTakeoverMinutes !== undefined) st.settings.masterAutoTakeoverMinutes = Math.max(1, Number(ds.masterAutoTakeoverMinutes || 3));
+        }
+        if (!st.settings.publicIPv4 && ds.publicIPv4 && !isStandbySync) st.settings.publicIPv4 = ds.publicIPv4;
       }
     } else if (data.settings?.cfApiToken && !st.settings.cfApiToken) {
       st.settings.cfApiToken = data.settings.cfApiToken;
@@ -430,6 +450,227 @@ function applyMasterRestore(data, certFiles = new Map(), options = {}) {
     outboundsCount: store.state.outbounds.length,
     certificatesCount: (store.state.certificates || []).length
   };
+}
+
+
+let _primaryMasterOfflineSinceMs = 0;
+
+function signHaSyncPayload(secret, ts, contentHash) {
+  return crypto
+    .createHmac("sha256", String(secret || "nexus-ha-default"))
+    .update(`${ts}.${contentHash}`)
+    .digest("hex");
+}
+
+function pushSyncToStandbyMaster(options = {}) {
+  return new Promise((resolve) => {
+    const st = store.state.settings || {};
+    const targetUrl = String(options.targetUrl || st.standbyMasterUrl || "").trim();
+    if (!targetUrl) {
+      return resolve({ ok: false, skipped: true, message: "尚未配置备用主控地址 (standbyMasterUrl)" });
+    }
+    if (st.masterHaRole === "standby" && !options.force) {
+      return resolve({ ok: false, skipped: true, message: "当前机器为备用主控 (Standby)，无需反向推送" });
+    }
+    try {
+      const zipBuf = buildMasterBackupZip(store, singbox, VERSION);
+      const ts = String(Date.now());
+      const contentHash = crypto.createHash("sha256").update(zipBuf).digest("hex");
+      const secret = String(options.secret || st.masterHaSecret || st.subToken || "nexus-ha-default").trim();
+      const sig = signHaSyncPayload(secret, ts, contentHash);
+      const cleanTarget = targetUrl.replace(/\/+$/, "");
+      const parsed = new URL(`${cleanTarget}/api/ha/sync-master`);
+      const client = parsed.protocol === "https:" ? https : http;
+      const myProto = st.webCertFile ? "https" : "http";
+      const myHost = st.webDomain || st.publicIPv4 || "127.0.0.1";
+      const myBase = normalizeBasePath(st.webBasePath || "/");
+      const primaryUrl = options.primaryUrl || st.primaryMasterUrl || `${myProto}://${myHost}:${st.webPort}${myBase === "/" ? "" : myBase}`;
+
+      const req = client.request(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+          path: parsed.pathname + parsed.search,
+          method: "POST",
+          rejectUnauthorized: false,
+          headers: {
+            "Content-Type": "application/zip",
+            "Content-Length": zipBuf.length,
+            "X-Nexus-HA-Timestamp": ts,
+            "X-Nexus-HA-Content-SHA256": contentHash,
+            "X-Nexus-HA-Signature": sig,
+            "X-Nexus-Primary-Url": primaryUrl,
+            ...(options.certRoot ? { "X-Nexus-Cert-Root": String(options.certRoot) } : {})
+          },
+          timeout: options.timeoutMs || 8000
+        },
+        (res) => {
+          let raw = "";
+          res.on("data", (c) => { raw += c; });
+          res.on("end", () => {
+            let data = {};
+            try { data = JSON.parse(raw || "{}"); } catch {}
+            const ok = res.statusCode >= 200 && res.statusCode < 300 && data.ok !== false;
+            store.transact((state) => {
+              state.settings.lastMasterSyncAt = new Date().toISOString();
+              state.settings.lastMasterSyncStatus = ok ? "ok" : `error: HTTP ${res.statusCode}`;
+            });
+            resolve({
+              ok,
+              statusCode: res.statusCode,
+              zipBytes: zipBuf.length,
+              standbyUrl: targetUrl,
+              syncedAt: store.state.settings.lastMasterSyncAt,
+              remote: data
+            });
+          });
+        }
+      );
+      req.on("error", (err) => {
+        store.transact((state) => {
+          state.settings.lastMasterSyncStatus = `error: ${err.message}`;
+        });
+        resolve({ ok: false, error: err.message });
+      });
+      req.on("timeout", () => {
+        req.destroy();
+        resolve({ ok: false, error: "连接备用主控超时" });
+      });
+      req.write(zipBuf);
+      req.end();
+    } catch (err) {
+      resolve({ ok: false, error: err.message });
+    }
+  });
+}
+
+async function triggerStandbyMasterTakeover(options = {}) {
+  const { reason = "手动触发备用主控接管全集群", targetIp = "" } = options;
+  let cfParams = null;
+  let oldPrimaryUrl = "";
+  let newMasterIp = "";
+
+  store.transact((st) => {
+    oldPrimaryUrl = st.settings.primaryMasterUrl || "";
+    st.settings.masterHaRole = "primary";
+    newMasterIp = String(targetIp || st.settings.publicIPv4 || "127.0.0.1").trim();
+    if (targetIp) st.settings.publicIPv4 = newMasterIp;
+    const localNode = (st.nodes || []).find((n) => n.id === "node_local" || n.isLocal);
+    if (localNode && newMasterIp && newMasterIp !== "127.0.0.1") {
+      localNode.host = newMasterIp;
+    }
+    if (st.settings.webDomain) {
+      cfParams = {
+        apiToken: st.settings.cfApiToken || "",
+        zoneId: st.settings.cfDefaultZoneId || "",
+        domain: st.settings.webDomain,
+        newIp: newMasterIp,
+        proxied: false
+      };
+    }
+  });
+
+  const dnsRes = cfParams
+    ? await updateCloudflareDnsIp(cfParams)
+    : { ok: true, mode: "skipped", message: "未配置主控绑定域名，无需切换主控 DNS" };
+
+  const clusterSync = await syncChangedClusterNodes(store.state, { forceAll: true });
+
+  const eventRecord = store.transact((st) => {
+    if (!Array.isArray(st.failoverLogs)) st.failoverLogs = [];
+    const logItem = {
+      id: `fo_master_${crypto.randomBytes(4).toString("hex")}`,
+      at: new Date().toISOString(),
+      action: "master_takeover",
+      primaryNodeId: "master_primary",
+      primaryNodeName: `原主力主控 (${oldPrimaryUrl || "Primary Master"})`,
+      standbyNodeId: "master_standby",
+      standbyNodeName: `备用主控接管 (${newMasterIp})`,
+      domain: st.settings.webDomain || newMasterIp,
+      oldIp: oldPrimaryUrl || "Primary",
+      newIp: newMasterIp,
+      inboundsTakenOver: (st.inbounds || []).length,
+      certsSynced: (st.certificates || []).length,
+      syncMode: "master-ha-takeover",
+      dnsMode: dnsRes.mode,
+      dnsMessage: dnsRes.message,
+      reason
+    };
+    st.failoverLogs.unshift(logItem);
+    if (st.failoverLogs.length > 50) st.failoverLogs.length = 50;
+    store.addAudit("system", "master_takeover", `备用主控接管集群: ${reason}`);
+    return logItem;
+  });
+
+  return {
+    ok: true,
+    masterHaRole: "primary",
+    event: eventRecord,
+    dns: dnsRes,
+    clusterSyncedNodes: clusterSync.length
+  };
+}
+
+function probeMasterUrlAlive(masterUrl, timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    try {
+      const clean = String(masterUrl || "").replace(/\/+$/, "");
+      if (!clean) return resolve(true);
+      const parsed = new URL(`${clean}/healthz`);
+      const client = parsed.protocol === "https:" ? https : http;
+      const req = client.request(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+          path: "/healthz",
+          method: "GET",
+          rejectUnauthorized: false,
+          timeout: timeoutMs
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode >= 200 && res.statusCode < 400);
+        }
+      );
+      req.on("error", () => resolve(false));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(false);
+      });
+      req.end();
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+async function checkStandbyMasterWatchdog(options = {}) {
+  const { nowMs = Date.now(), skipActiveProbe = false } = options;
+  const s = store.state.settings || {};
+  if (s.masterHaRole !== "standby" || !s.masterAutoTakeover || !s.primaryMasterUrl) {
+    _primaryMasterOfflineSinceMs = 0;
+    return { ok: true, triggered: false };
+  }
+  const alive = skipActiveProbe ? false : await probeMasterUrlAlive(s.primaryMasterUrl);
+  if (alive) {
+    _primaryMasterOfflineSinceMs = 0;
+    return { ok: true, triggered: false, primaryAlive: true };
+  }
+  if (!_primaryMasterOfflineSinceMs) {
+    const syncRefMs = Date.parse(s.lastMasterSyncAt || "") || nowMs;
+    _primaryMasterOfflineSinceMs = skipActiveProbe ? syncRefMs : nowMs;
+  }
+  const thresholdMin = Math.max(1, Number(s.masterAutoTakeoverMinutes || 3));
+  const elapsedMs = Math.max(0, nowMs - _primaryMasterOfflineSinceMs);
+  if (elapsedMs >= thresholdMin * 60 * 1000) {
+    _primaryMasterOfflineSinceMs = 0;
+    const res = await triggerStandbyMasterTakeover({
+      reason: `主控双活自愈守护：主力主控机连续断线满 ${thresholdMin} 分钟，备用主控已自动接管全集群并切换 Cloudflare DNS`,
+      targetIp: options.targetIp || s.publicIPv4 || ""
+    });
+    return { ok: true, triggered: true, takeover: res };
+  }
+  return { ok: true, triggered: false, offlineElapsedMs: elapsedMs };
 }
 
 function getPanelInfoSummary() {
@@ -1149,6 +1390,9 @@ function autoApplyIfEnabled(portsToOpen = []) {
         }
       } catch { /* ignore */ }
       syncChangedClusterNodes(store.state).catch(() => {});
+      if (store.state.settings.masterHaRole !== "standby" && store.state.settings.standbyMasterUrl && store.state.settings.masterHaSyncMode === "on_change") {
+        pushSyncToStandbyMaster().catch(() => {});
+      }
     }
   });
 }
@@ -1193,6 +1437,45 @@ async function handleRequest(req, res) {
         res.end(output.body);
         return;
       }
+    }
+
+    // 2.5 Public Cluster Agent Heartbeat & Master-Standby HA Sync (Token / HMAC Authenticated across any webBasePath)
+    if ((rawPathname === "/api/cluster/heartbeat" || strippedForSub === "/api/cluster/heartbeat") && method === "POST") {
+      const body = await readJson(req);
+      const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim() || String(body.token || "");
+      const nodeId = String(req.headers["x-nexus-node"] || body.nodeId || "").trim();
+      const hbResult = handleAgentHeartbeat(store, nodeId, token, body);
+      return sendJson(res, 200, hbResult);
+    }
+
+    if ((rawPathname === "/api/ha/sync-master" || strippedForSub === "/api/ha/sync-master") && method === "POST") {
+      const rawBuf = await readBuffer(req, 64 * 1024 * 1024);
+      const ts = String(req.headers["x-nexus-ha-timestamp"] || "");
+      const sig = String(req.headers["x-nexus-ha-signature"] || "");
+      const primaryUrl = String(req.headers["x-nexus-primary-url"] || "");
+      const certRootHeader = String(req.headers["x-nexus-cert-root"] || "");
+      const contentHash = crypto.createHash("sha256").update(rawBuf).digest("hex");
+      const extracted = extractMasterBackupPayload(rawBuf);
+      const localSecret = String(store.state.settings.masterHaSecret || store.state.settings.subToken || "nexus-ha-default").trim();
+      const incomingSecret = String(extracted.stateData?.settings?.masterHaSecret || extracted.stateData?.settings?.subToken || "").trim();
+      const expectedLocal = signHaSyncPayload(localSecret, ts, contentHash);
+      const expectedIncoming = incomingSecret ? signHaSyncPayload(incomingSecret, ts, contentHash) : "";
+      const isFreshStandby = (store.state.inbounds || []).length === 0 || !store.state.settings.masterHaSecret;
+      const validSig = sig && (sig === expectedLocal || (isFreshStandby && expectedIncoming && sig === expectedIncoming));
+      if (!validSig) {
+        return sendError(res, 401, "主控热备同步密钥 (masterHaSecret) 签名校验失败", "ha_unauthorized");
+      }
+      const result = applyMasterRestore(extracted.stateData, extracted.certFiles, {
+        restorePanelSettings: true,
+        actor: "master-ha-sync",
+        certRoot: certRootHeader,
+        isStandbySync: true,
+        primaryUrl
+      });
+      if (result.restarting && activeServer && !process.env.NG_TEST_MODE) {
+        setTimeout(() => restartPanelServer(), 350);
+      }
+      return sendJson(res, 200, { ...result, masterHaRole: "standby", syncedAt: store.state.settings.lastMasterSyncAt });
     }
 
     // 3. Enforce webBasePath
@@ -2803,6 +3086,13 @@ async function handleRequest(req, res) {
         if (body.cfDefaultZoneId !== undefined) s.cfDefaultZoneId = String(body.cfDefaultZoneId).trim();
         if (body.autoFailover !== undefined) s.autoFailover = Boolean(body.autoFailover);
         if (body.failoverThresholdSec !== undefined) s.failoverThresholdSec = Math.max(30, Number(body.failoverThresholdSec || 90));
+        if (body.masterHaRole !== undefined) s.masterHaRole = body.masterHaRole === "standby" ? "standby" : "primary";
+        if (body.standbyMasterUrl !== undefined) s.standbyMasterUrl = String(body.standbyMasterUrl || "").trim();
+        if (body.primaryMasterUrl !== undefined) s.primaryMasterUrl = String(body.primaryMasterUrl || "").trim();
+        if (body.masterHaSecret !== undefined) s.masterHaSecret = String(body.masterHaSecret || "").trim();
+        if (body.masterHaSyncMode !== undefined) s.masterHaSyncMode = String(body.masterHaSyncMode || "on_change").trim();
+        if (body.masterAutoTakeover !== undefined) s.masterAutoTakeover = Boolean(body.masterAutoTakeover);
+        if (body.masterAutoTakeoverMinutes !== undefined) s.masterAutoTakeoverMinutes = Math.max(1, Number(body.masterAutoTakeoverMinutes || 3));
         if (body.sessionMaxAge !== undefined) {
           s.sessionMaxAge = Math.max(5, Number(body.sessionMaxAge || 720));
           sessions.setMaxAgeMinutes(s.sessionMaxAge);
@@ -2845,6 +3135,48 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { ok: true, message: '账号密码已更新，请重新登录' });
     }
 
+    // 14.8 Master-Standby HA & Autonomous Data Plane Endpoints
+    if (pathname === "/api/ha/status" && method === "GET") {
+      const s = store.state.settings || {};
+      return sendJson(res, 200, {
+        ok: true,
+        autonomousDataPlane: true,
+        masterHaRole: s.masterHaRole || "primary",
+        standbyMasterUrl: s.standbyMasterUrl || "",
+        primaryMasterUrl: s.primaryMasterUrl || "",
+        masterHaSyncMode: s.masterHaSyncMode || "on_change",
+        masterAutoTakeover: Boolean(s.masterAutoTakeover),
+        masterAutoTakeoverMinutes: Number(s.masterAutoTakeoverMinutes || 3),
+        lastMasterSyncAt: s.lastMasterSyncAt || "",
+        lastMasterSyncStatus: s.lastMasterSyncStatus || "",
+        clusterNodesCount: (store.state.nodes || []).length,
+        inboundsCount: (store.state.inbounds || []).length
+      });
+    }
+
+    if (pathname === "/api/ha/push-sync" && method === "POST") {
+      const body = await readJson(req);
+      const syncRes = await pushSyncToStandbyMaster({
+        targetUrl: body.standbyMasterUrl || store.state.settings.standbyMasterUrl,
+        secret: body.masterHaSecret || store.state.settings.masterHaSecret,
+        certRoot: body.certRoot || "",
+        force: true
+      });
+      if (!syncRes.ok) {
+        return sendError(res, 400, syncRes.error || syncRes.message || "推送同步至备用主控失败");
+      }
+      return sendJson(res, 200, syncRes);
+    }
+
+    if (pathname === "/api/ha/takeover" && method === "POST") {
+      const body = await readJson(req);
+      const takeoverRes = await triggerStandbyMasterTakeover({
+        reason: body.reason || `管理员 [${session.username}] 手动触发备用主控一键接管集群`,
+        targetIp: body.targetIp || ""
+      });
+      return sendJson(res, 200, takeoverRes);
+    }
+
     // 15. Backup & Restore (Supports full .zip Master Disaster Recovery Archive with certs/port/path & .json)
     if (pathname === '/api/backup' && method === 'GET') {
       const fmt = (url.searchParams.get('format') || 'json').toLowerCase();
@@ -2883,7 +3215,7 @@ async function handleRequest(req, res) {
       let restorePanelSettings = true;
       let certRoot = '';
       if (cType.includes('application/zip') || cType.includes('application/octet-stream')) {
-        const rawBuf = await readRawBody(req, 64 * 1024 * 1024);
+        const rawBuf = await readBuffer(req, 64 * 1024 * 1024);
         extracted = extractMasterBackupPayload(rawBuf);
         if (url.searchParams.get('restorePanelSettings') === 'false') {
           restorePanelSettings = false;
@@ -2987,7 +3319,10 @@ if (require.main === module) {
     try { cleanupSystemLogsAndMemory(singbox, store); } catch { /* ignore */ }
   }, 6 * 3600 * 1000).unref();
   setInterval(() => singbox.pollConnectionsAndEnforceLimits().catch(() => {}), 1000).unref();
-  setInterval(() => checkClusterHealthAndAutoFailover(store).catch(() => {}), 30000).unref();
+  setInterval(() => {
+    checkClusterHealthAndAutoFailover(store).catch(() => {});
+    checkStandbyMasterWatchdog().catch(() => {});
+  }, 30000).unref();
   setInterval(() => syncChangedClusterNodes(store.state, { isDailyTick: true }).catch(() => {}), 24 * 3600 * 1000).unref();
 
   const gracefulShutdown = () => {
@@ -3003,5 +3338,8 @@ module.exports = {
   store,
   singbox,
   startPanelServer,
-  handleRequest
+  handleRequest,
+  pushSyncToStandbyMaster,
+  triggerStandbyMasterTakeover,
+  checkStandbyMasterWatchdog
 };

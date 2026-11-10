@@ -467,7 +467,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.4 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.5 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -817,7 +817,7 @@ function renderCluster() {
   const foRows = (state.failoverLogs || []).map((log) => `
     <tr>
       <td><strong>${fmtDateTime(log.at)}</strong></td>
-      <td><span class="tag ${log.action.includes('failover') ? 'relay' : 'tls'}">${log.action === 'exit_failover' ? '⚡ 落地容错切换' : (log.action === 'exit_failback' ? '✓ 落地恢复回切' : (log.action === 'failover' ? '⚡ 中转容灾接管' : '✓ 中转恢复回切'))}</span></td>
+      <td><span class="tag ${log.action.includes('failover') ? 'relay' : 'tls'}">${log.action === 'master_takeover' ? '🛡️ 备用主控接管' : (log.action === 'exit_failover' ? '⚡ 落地容错切换' : (log.action === 'exit_failback' ? '✓ 落地恢复回切' : (log.action === 'failover' ? '⚡ 中转容灾接管' : '✓ 中转恢复回切')))}</span></td>
       <td><b>${esc(log.primaryNodeName)}</b> ➔ <b>${esc(log.standbyNodeName || '主力本机')}</b></td>
       <td><code>${esc(log.domain)}</code>: <code>${esc(log.oldIp)}</code> ➔ <code>${esc(log.newIp)}</code></td>
       <td><small>${esc(log.dnsMessage || log.reason || '')}</small></td>
@@ -825,6 +825,18 @@ function renderCluster() {
   `).join('');
 
   return `
+
+    <div class="notice" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;border-left:4px solid var(--success)">
+      <div style="flex:1;min-width:260px">
+        <b style="color:var(--success)">🛡️ 控制面与数据面彻底解耦（主控宕机 = 全部节点 0 掉线 · 0 超时）+ 主控双活热备 (Master HA)</b><br>
+        <span>所有中转机与落地机的 <code>sing-box</code> 节点与 SSL 证书均在子机器本地独立持久化守护运行：<b>即使主控面板机故障或断网，全部客户节点与中转转发依然 100% 正常高速连通，绝不超时掉线</b>！同时支持配置「备用主控热备同步」，主力主控故障时由备用主控秒级接管。</span>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${state.settings?.standbyMasterUrl ? '<button class="primary" data-action="push-master-ha-sync">🔄 立即同步至备用主控</button>' : '<button class="primary" data-action="jump-settings">🛡️ 配置备用主控热备</button>'}
+        ${state.settings?.masterHaRole === 'standby' ? '<button class="warning" data-action="trigger-master-ha-takeover">⚡ 备用主控一键接管集群</button>' : ''}
+      </div>
+    </div>
+
     <section class="metrics-4">
       <article class="metric" style="--accent:#2563eb">
         <span>中转入口机 (独立域名)</span>
@@ -1905,6 +1917,40 @@ function renderCertificates() {
         </div>
       </div>
     </section>
+
+    <section class="panel" style="margin-top:16px">
+      <div class="panel-head">
+        <div>
+          <h2>六、主控面板机如果故障宕机，所有中转机和落地机的节点会掉线超时吗？如何免手动迁移？</h2>
+          <p>控制面与数据面彻底解耦架构（主控宕机 = 客户节点 0 掉线）+ 主控双活热备 (Master-Standby HA) 完整说明</p>
+        </div>
+        <span class="status valid">数据面 100% 脱机自治 · 主控双活自愈</span>
+      </div>
+      <div class="panel-body">
+        <div class="grid-2">
+          <div style="padding:14px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);font-size:13px;line-height:1.7">
+            <b style="color:var(--success);font-size:14px">1. 主控面板机器宕机时，现有的全部中转机和落地机节点会掉线或陷入超时吗？</b>
+            <ul style="margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
+              <li><b>绝对不会掉线！所有客户节点 100% 正常使用，0 秒中断，绝不超时！</b></li>
+              <li><b>原因（控制面与数据面彻底解耦）</b>：<br>
+                ① 每台中转机、落地机、热备机上的 <code>sing-box</code> 配置文件 (<code>/etc/nexusgate/sing-box/config.json</code>) 与 SSL 证书都是<b>持久保存在子机器本地硬盘</b>并由子机器本地 <code>systemd</code> 独立守护运行的；<br>
+                ② 客户的连接路径是 <code>客户端 ➔ 中转机独立域名/IP ➔ 落地机共享 SS ➔ 目标网站</code>，<b>平时数据流量完全不经过主控机</b>，也不需要主控实时在线鉴权；<br>
+                ③ 主控失联期间，子机器 Agent 自动进入「<b>脱机自治守护模式 (Autonomous Offline Mode)</b>」，将期间产生的客户流量增量写入子机器本地 <code>agent-offline-state.json</code> 缓存，等主控恢复或切至备用主控后自动无损补报，1 字节流量都不会丢！</li>
+            </ul>
+          </div>
+          <div style="padding:14px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);font-size:13px;line-height:1.7">
+            <b style="color:var(--primary);font-size:14px">2. 如果主控机彻底坏了，有没有不用手动迁移备份的更方便办法？</b>
+            <ul style="margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
+              <li><b>方案 A：配置「主控双活热备 (Master-Standby HA)」（全自动 · 免手动导入）</b>：<br>
+                在另一台备用服务器上也安装好本面板，然后在主力主控《面板设置与安全》的「<b>备用主控面板地址</b>」填入该备用机地址，选择「<b>⚡ 变更触发同步（平时 0 流量）</b>」。每次你在主控改节点，主控会自动把全量 <code>.zip</code> 数据（含<b>相同的访问端口、安全根路径、登录账号密码、SSL 证书与全部节点</b>）实时克隆到备用主控！主力主控故障时，备用主控自动（或一键）接管全集群并切换主控 Cloudflare DNS，所有子机器 Agent 自动切向备用主控！</li>
+              <li><b>方案 B：使用 <code>.zip</code> 全量主控灾备包异机 1:1 克隆恢复</b>：<br>
+                平时在 Web 点击「<b>📦 导出全量主控灾备包 (.zip)</b>」或 SSH 执行 <code>ng backup</code> 保存一个 <code>.zip</code> 文件；在任何新服务器上执行 <code>ng restore 备份包.zip</code>（或 Web 直接上传 <code>.zip</code>），新机器立即恢复成与原主控<b>完全一致的端口、安全路径、账号密码与全部节点</b>！</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
   `;
 }
 
@@ -2005,6 +2051,61 @@ function renderSettings() {
               <option value="debug"${selected('debug', s.singboxLogLevel)}>debug (调试模式)</option>
             </select>
           </label>
+
+
+          <div class="section-title">🛡️ 主控面板双活热备与断线自动接管 (Master-Standby HA · 免手动迁移)</div>
+          <div class="wide notice" style="font-size:12px;line-height:1.6">
+            <b>💡 为什么主控故障时客户节点绝不掉线？如何免去手动迁移备份？</b><br>
+            1. <b>数据面脱机自治 (0 掉线)</b>：中转机与落地机上的节点由各子机器本地独立运行，主控面板机就算断网宕机，<b>所有客户的节点和转发 100% 照常使用、绝不超时</b>，离线期间流量缓存在子机器本地，主控恢复后自动无损补报。<br>
+            2. <b>主控双活热备 (免手动恢复)</b>：在下方填写一台备用主控地址（可直接使用集群中的热备机或任意装有本面板的备用机），主控会在每次新增/修改节点时自动将 <b>原端口、原安全路径、原账号密码、SSL 证书与全部节点配置 (.zip)</b> 实时同步到备用主控！
+          </div>
+          <label>
+            当前面板主控角色 (masterHaRole)
+            <select name="masterHaRole">
+              <option value="primary"${selected('primary', s.masterHaRole || 'primary')}>🟢 主力主控面板 (Primary Master · 统管集群与主动推送)</option>
+              <option value="standby"${selected('standby', s.masterHaRole)}>🟠 热备副主控面板 (Standby Master · 实时接收同步并待命接管)</option>
+            </select>
+          </label>
+          <label>
+            备用主控同步策略 (masterHaSyncMode · 省流高效)
+            <select name="masterHaSyncMode">
+              <option value="on_change"${selected('on_change', s.masterHaSyncMode || 'on_change')}>⚡ 变更触发同步 (强烈推荐 · 仅增改节点时同步，平时 0 流量)</option>
+              <option value="daily"${selected('daily', s.masterHaSyncMode)}>⏱ 每日定时同步一次 (每天自动同步全量快照)</option>
+              <option value="manual"${selected('manual', s.masterHaSyncMode)}>🖐 仅手动点击同步</option>
+            </select>
+          </label>
+          <label>
+            备用主控面板地址 (standbyMasterUrl · 主力主控填写)
+            <input name="standbyMasterUrl" value="${esc(s.standbyMasterUrl || '')}" placeholder="例如: http://备用主控IP:端口 或 https://备主控域名:端口">
+            <small>填写后，本机所有受控端 Agent 也会自动获知该备用主控地址，主力主控失联时 Agent 自动切往备用主控汇报。</small>
+          </label>
+          <label>
+            主力主控面板地址 (primaryMasterUrl · 仅在备用主控上填写用于探活)
+            <input name="primaryMasterUrl" value="${esc(s.primaryMasterUrl || '')}" placeholder="备用主控自动接收同步时会自动填入主力主控地址">
+          </label>
+          <label>
+            主备加密同步共享密钥 (masterHaSecret · 选填)
+            <input name="masterHaSecret" value="${esc(s.masterHaSecret || '')}" placeholder="留空则默认使用上方 20 位聚合订阅安全码进行 HMAC 签名校验">
+          </label>
+          <label>
+            备用主控自动接管模式 (主力主控宕机时是否自动转正并切 DNS)
+            <select name="masterAutoTakeoverSelect">
+              <option value="manual"${!s.masterAutoTakeover ? ' selected' : ''}>🔒 默认关闭自动接管 · 仅手动点击「一键接管」</option>
+              <option value="1"${s.masterAutoTakeover && Number(s.masterAutoTakeoverMinutes) === 1 ? ' selected' : ''}>⚡ 主力主控连续断线 1 分钟自动接管 + 切 CF DNS</option>
+              <option value="3"${s.masterAutoTakeover && Number(s.masterAutoTakeoverMinutes || 3) === 3 ? ' selected' : ''}>⚡ 主力主控连续断线 3 分钟自动接管 + 切 CF DNS (推荐)</option>
+              <option value="5"${s.masterAutoTakeover && Number(s.masterAutoTakeoverMinutes) === 5 ? ' selected' : ''}>⚡ 主力主控连续断线 5 分钟自动接管 + 切 CF DNS</option>
+              <option value="10"${s.masterAutoTakeover && Number(s.masterAutoTakeoverMinutes) === 10 ? ' selected' : ''}>⚡ 主力主控连续断线 10 分钟自动接管 + 切 CF DNS</option>
+            </select>
+          </label>
+          <div class="wide" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:10px 12px;border-radius:10px;background:var(--surface-soft);border:1px solid var(--line)">
+            <small>
+              最近主备同步状态: <b>${s.lastMasterSyncAt ? `${fmtDateTime(s.lastMasterSyncAt)} (${esc(s.lastMasterSyncStatus || 'ok')})` : '尚未执行远程热备同步（或随时使用顶部 .zip 导出备份）'}</b>
+            </small>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button type="button" data-action="push-master-ha-sync">🔄 立即同步全量数据到备用主控</button>
+              <button type="button" class="warning" data-action="trigger-master-ha-takeover">⚡ 备用主控一键接管集群</button>
+            </div>
+          </div>
 
           <div class="form-actions">
             <button type="submit" class="primary">保存面板设置</button>
@@ -3898,6 +3999,36 @@ document.addEventListener('click', async (e) => {
 
   try {
     if (action === 'jump-migrate') { setPage('migrate'); }
+
+    else if (action === 'jump-settings') {
+      setPage('settings');
+    }
+    else if (action === 'push-master-ha-sync') {
+      const form = $('#settings-form');
+      const standbyMasterUrl = form ? (form.querySelector('[name="standbyMasterUrl"]')?.value || '').trim() : (state.settings?.standbyMasterUrl || '');
+      const masterHaSecret = form ? (form.querySelector('[name="masterHaSecret"]')?.value || '').trim() : (state.settings?.masterHaSecret || '');
+      if (!standbyMasterUrl) {
+        toast('请先在《面板设置与安全》填写「备用主控面板地址 (standbyMasterUrl)」', true);
+        setPage('settings');
+        return;
+      }
+      toast('正在打包全量主控状态 (.zip) 并加密同步至备用主控...');
+      const res = await api('/api/ha/push-sync', {
+        method: 'POST',
+        body: JSON.stringify({ standbyMasterUrl, masterHaSecret })
+      });
+      toast(`✅ 已成功将全量数据 (${fmtBytes(res.zipBytes || 0)}) 1:1 同步至备用主控！`);
+      load(state.page, { silent: true });
+    }
+    else if (action === 'trigger-master-ha-takeover') {
+      const res = await api('/api/ha/takeover', {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+      toast(`⚡ 备用主控已成功接管全集群！(${res.dns?.message || '已激活为主力主控'})`);
+      load(state.page, { silent: true });
+    }
+
     else if (action === 'jump-cluster') { setPage('cluster'); }
     else if (action === 'jump-guide') { setPage('guide'); }
     else if (action === 'filter-routing-node') {
@@ -4992,9 +5123,12 @@ document.addEventListener('submit', async (e) => {
       load('certificates');
     }
     else if (form.id === 'settings-form') {
+      const takeoverSel = data.masterAutoTakeoverSelect || 'manual';
       const payload = {
         ...data,
-        strictBasePath: form.querySelector('[name="strictBasePath"]')?.checked || false
+        strictBasePath: form.querySelector('[name="strictBasePath"]')?.checked || false,
+        masterAutoTakeover: takeoverSel !== 'manual',
+        masterAutoTakeoverMinutes: takeoverSel !== 'manual' ? Number(takeoverSel || 3) : Number(state.settings?.masterAutoTakeoverMinutes || 3)
       };
       const res = await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
       toast('面板设置已保存');

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# NexusGate Plus · 受控端 Agent 一键接入脚本 v1.0.4 (支持中转机 / 落地机 / 热备容灾机 / 3x-ui 原地平滑接管)
+# NexusGate Plus · 受控端 Agent 一键接入脚本 v1.0.5 (支持中转机 / 落地机 / 热备容灾机 / 3x-ui 原地平滑接管)
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 MASTER_URL=""
+STANDBY_MASTER_URL=""
 NODE_ID=""
 AGENT_TOKEN=""
 AGENT_PORT="19090"
@@ -15,6 +16,7 @@ REPO="${NG_REPO:-mor2026-28/NexusGate-Plus}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --master) MASTER_URL="$2"; shift 2 ;;
+    --standby-master) STANDBY_MASTER_URL="$2"; shift 2 ;;
     --node-id) NODE_ID="$2"; shift 2 ;;
     --token) AGENT_TOKEN="$2"; shift 2 ;;
     --port) AGENT_PORT="$2"; shift 2 ;;
@@ -28,7 +30,7 @@ done
   exit 1
 }
 
-echo -e "\033[0;36m[NexusGate-Plus Agent v1.0.4]\033[0m 正在部署超轻量受控端节点 (${NODE_ID})..."
+echo -e "\033[0;36m[NexusGate-Plus Agent v1.0.5]\033[0m 正在部署超轻量受控端节点 (${NODE_ID})..."
 
 mkdir -p /opt/nexusgate-agent /etc/nexusgate/sing-box /etc/nexusgate/certs
 
@@ -115,7 +117,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env node --max-old-space-size=48 --expose-gc /opt/nexusgate-agent/nexus-agent.js --master "${MASTER_URL}" --node-id "${NODE_ID}" --token "${AGENT_TOKEN}" --port "${AGENT_PORT}"
+ExecStart=/usr/bin/env node --max-old-space-size=48 --expose-gc /opt/nexusgate-agent/nexus-agent.js --master "${MASTER_URL}" --standby-master "${STANDBY_MASTER_URL}" --node-id "${NODE_ID}" --token "${AGENT_TOKEN}" --port "${AGENT_PORT}"
 Restart=always
 RestartSec=3
 MemoryMax=64M
@@ -128,4 +130,4 @@ EOF
 systemctl daemon-reload
 systemctl enable --now nexusgate-singbox.service 2>/dev/null || true
 systemctl enable --now nexusgate-agent.service
-echo -e "\033[0;32m[成功]\033[0m NexusGate Plus Agent v1.0.4 (${NODE_ID}) 已启动并连接主控 (${MASTER_URL})！"
+echo -e "\033[0;32m[成功]\033[0m NexusGate Plus Agent v1.0.5 (${NODE_ID}) 已启动并连接主控 (${MASTER_URL})！"

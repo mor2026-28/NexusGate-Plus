@@ -2909,3 +2909,156 @@ test('25. v1.0.4 Full Master .zip Disaster Recovery Clone (Port/Path/Account/Cer
     fs.rmSync(tempCertRestoreDir, { recursive: true, force: true });
   }
 });
+
+test('26. v1.0.5 Control Plane / Data Plane Decoupling (Master Outage = 0 Node Downtime & Offline Traffic Persistence) + Master-Standby HA Real-Time .zip Clone & Auto-Takeover', async () => {
+  const {
+    addDelta,
+    pendingInboundDeltas,
+    pendingClientDeltas,
+    loadOfflineState,
+    applySyncedPayload,
+    sendHeartbeat,
+    createAgentHttpServer
+  } = require('../agent/nexus-agent');
+  const { pushSyncToStandbyMaster, checkStandbyMasterWatchdog } = require('../server');
+
+  const tempAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-agent-ha-'));
+  const tempCertRestoreDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-master-ha-certs-'));
+  const agentConfigPath = path.join(tempAgentDir, 'sing-box', 'config.json');
+  const agentStatePath = path.join(tempAgentDir, 'sing-box', 'agent-offline-state.json');
+
+  const savedRole = store.state.settings.masterHaRole;
+  const savedStandbyUrl = store.state.settings.standbyMasterUrl;
+  const savedPrimaryUrl = store.state.settings.primaryMasterUrl;
+  const savedHaSecret = store.state.settings.masterHaSecret;
+
+  let agentServer = null;
+  try {
+    // 1. Ensure we have an active relay node and inbound on the cluster
+    const relayNode = (store.state.nodes || []).find((n) => n.role === 'relay' && !n.isLocal) || store.state.nodes[0];
+    assert.ok(relayNode, 'Relay node must exist in cluster');
+    const relayInb = (store.state.inbounds || []).find((i) => i.nodeId === relayNode.id) || store.state.inbounds[0];
+    assert.ok(relayInb, 'Inbound must exist on relay node');
+
+    const { compileNodeSingboxConfig } = require('../lib/cluster');
+    const compiled = compileNodeSingboxConfig(store.state, relayNode.id);
+
+    // 2. Apply synced payload to local Agent disk (simulating normal Master -> Agent config push)
+    const syncApplyRes = applySyncedPayload(
+      {
+        configHash: compiled.configHash,
+        singboxConfig: compiled.singboxConfig,
+        certificates: [],
+        standbyMasterUrl: `${baseUrl}/SecPath16Chars99`
+      },
+      { configPath: agentConfigPath, statePath: agentStatePath }
+    );
+    assert.equal(syncApplyRes.ok, true);
+    assert.ok(fs.existsSync(agentConfigPath), 'Agent must persist sing-box/config.json on local disk');
+
+    // 3. Simulate COMPLETE PRIMARY MASTER OUTAGE (master URL is dead port http://127.0.0.1:1, no standby yet)
+    //    Meanwhile, user traffic continues flowing on the Relay server!
+    addDelta(pendingInboundDeltas, relayInb.tag, 12500000, 87500000);
+    if (relayInb.clients && relayInb.clients[0]?.email) {
+      addDelta(pendingClientDeltas, relayInb.clients[0].email, 12500000, 87500000);
+    }
+
+    const offlineHb1 = await sendHeartbeat({
+      master: 'http://127.0.0.1:1',
+      standbyMaster: '',
+      token: relayNode.token,
+      nodeId: relayNode.id,
+      configPath: agentConfigPath,
+      statePath: agentStatePath,
+      skipClashPoll: true,
+      timeoutMs: 300
+    });
+
+    assert.equal(offlineHb1.ok, false, 'Heartbeat to dead Master returns ok: false');
+    assert.equal(offlineHb1.autonomousMode, true, 'Agent must enter Autonomous Data Plane Mode when Master is offline');
+    assert.ok(fs.existsSync(agentConfigPath), 'Local sing-box/config.json remains 100% intact during Master outage (0 node downtime)');
+    const persistedCfg = JSON.parse(fs.readFileSync(agentConfigPath, 'utf8'));
+    assert.ok(Array.isArray(persistedCfg.inbounds) && persistedCfg.inbounds.length > 0, 'All Relay inbounds stay active on disk during Master outage');
+    assert.ok(fs.existsSync(agentStatePath), 'Agent must persist buffered offline traffic deltas to disk during Master outage');
+    const savedOffline = JSON.parse(fs.readFileSync(agentStatePath, 'utf8'));
+    assert.equal(savedOffline.inboundDeltas[relayInb.tag].up >= 12500000, true, 'Offline traffic delta must be safely persisted to disk');
+
+    // 4. Test Dual-Master Automatic Failover in Agent:
+    //    Primary Master (`http://127.0.0.1:1`) is still dead, but `standbyMaster` points to our live server (`${baseUrl}/SecPath16Chars99`)!
+    const preUp = Number(relayInb.up || 0);
+    const preDown = Number(relayInb.down || 0);
+
+    const failoverHb = await sendHeartbeat({
+      master: 'http://127.0.0.1:1',
+      standbyMaster: `${baseUrl}/SecPath16Chars99`,
+      token: relayNode.token,
+      nodeId: relayNode.id,
+      configPath: agentConfigPath,
+      statePath: agentStatePath,
+      skipClashPoll: true,
+      timeoutMs: 300
+    });
+
+    assert.equal(failoverHb.ok, true, 'Agent must automatically fail over to standbyMasterUrl when Primary Master is unreachable');
+    assert.equal(failoverHb.usingStandbyMaster, true, 'Agent must mark usingStandbyMaster = true');
+    assert.equal(failoverHb.autonomousMode, false, 'Agent exits offline mode once connected to Standby Master');
+
+    const updatedInb = store.state.inbounds.find((i) => i.id === relayInb.id);
+    assert.equal(Number(updatedInb.up) >= preUp + 12500000, true, 'Buffered offline upload traffic must be losslessly flushed to Standby Master');
+    assert.equal(Number(updatedInb.down) >= preDown + 87500000, true, 'Buffered offline download traffic must be losslessly flushed to Standby Master');
+    assert.equal(Object.keys(pendingInboundDeltas).length, 0, 'Pending offline traffic buffer must be cleared after Master confirms receipt');
+
+    // 5. Test Primary Master -> Standby Master Real-Time .zip HA Push Sync (`pushSyncToStandbyMaster` -> `/api/ha/sync-master`)
+    store.transact((st) => {
+      st.settings.masterHaRole = 'primary';
+      st.settings.standbyMasterUrl = `${baseUrl}/SecPath16Chars99`;
+      st.settings.masterHaSecret = 'ha_shared_secret_v105_test';
+      st.settings.masterHaSyncMode = 'on_change';
+    });
+
+    const haSyncRes = await pushSyncToStandbyMaster({
+      targetUrl: `${baseUrl}/SecPath16Chars99`,
+      secret: 'ha_shared_secret_v105_test',
+      primaryUrl: 'http://127.0.0.1:1/SecPath16Chars99',
+      certRoot: tempCertRestoreDir,
+      force: true
+    });
+
+    assert.equal(haSyncRes.ok, true, 'pushSyncToStandbyMaster must succeed with HMAC-SHA256 verification');
+    assert.ok(haSyncRes.zipBytes > 1000, 'Master HA sync payload must be a complete .zip archive');
+    assert.equal(store.state.settings.masterHaRole, 'standby', 'Receiving Standby Master must set masterHaRole = standby');
+    assert.equal(store.state.settings.primaryMasterUrl, 'http://127.0.0.1:1/SecPath16Chars99', 'Standby Master must record primaryMasterUrl');
+
+    // 6. Test Standby Master Auto-Takeover Watchdog (`checkStandbyMasterWatchdog`) when Primary Master is offline >= threshold
+    store.transact((st) => {
+      st.settings.masterAutoTakeover = true;
+      st.settings.masterAutoTakeoverMinutes = 3;
+      st.settings.lastMasterSyncAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    });
+
+    const wdRes = await checkStandbyMasterWatchdog({
+      nowMs: Date.now(),
+      skipActiveProbe: true,
+      targetIp: '198.51.100.250'
+    });
+
+    assert.equal(wdRes.ok, true);
+    assert.equal(wdRes.triggered, true, 'Standby Master watchdog must automatically trigger takeover when Primary Master is offline >= 3 minutes');
+    assert.equal(store.state.settings.masterHaRole, 'primary', 'Standby Master must promote itself to primary after takeover');
+    assert.ok(
+      store.state.failoverLogs.some((l) => l.action === 'master_takeover' && l.newIp === '198.51.100.250'),
+      'Master takeover must be recorded in failoverLogs'
+    );
+  } finally {
+    if (agentServer) agentServer.close();
+    store.transact((st) => {
+      st.settings.masterHaRole = savedRole || 'primary';
+      st.settings.standbyMasterUrl = savedStandbyUrl || '';
+      st.settings.primaryMasterUrl = savedPrimaryUrl || '';
+      st.settings.masterHaSecret = savedHaSecret || '';
+      st.settings.masterAutoTakeover = false;
+    });
+    fs.rmSync(tempAgentDir, { recursive: true, force: true });
+    fs.rmSync(tempCertRestoreDir, { recursive: true, force: true });
+  }
+});
