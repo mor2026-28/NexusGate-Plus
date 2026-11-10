@@ -435,7 +435,7 @@ function setPage(page) {
     settings: '面板设置与安全'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate · 枢门 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.0 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -494,7 +494,33 @@ function renderOverview() {
     </div>
   `).join('');
 
+  const clusterNodes = state.nodes?.length ? state.nodes : (ov.nodes || []);
+  const relayCnt = counts.relayNodes || clusterNodes.filter((n) => n.role === 'relay' || n.role === 'hybrid').length || 1;
+  const exitCnt = counts.exitNodes || clusterNodes.filter((n) => n.role === 'exit' || n.role === 'hybrid').length || 0;
+  const standbyCnt = counts.standbyNodes || clusterNodes.filter((n) => n.role === 'standby' || n.mirrorStandby).length || 0;
+
   return `
+    <section class="cluster-hub-banner">
+      <div class="cluster-hub-left">
+        <div class="cluster-hub-title">
+          <span class="tag">NexusGate Plus v1.0.0</span>
+          <span>分布式中转与共享落地主控中心</span>
+        </div>
+        <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
+        <div class="cluster-hub-pills">
+          <span class="tag">🖥 中转入口机: ${relayCnt} 台</span>
+          <span class="tag tls">⇄ 共享落地机: ${exitCnt} 台</span>
+          <span class="tag relay">🛡 热备容灾机: ${standbyCnt} 台</span>
+        </div>
+      </div>
+      <div class="cluster-hub-actions">
+        <button class="primary" data-action="jump-cluster">❖ 集群与容灾编排</button>
+        <button data-action="add-cluster-node" data-role="relay">＋ 添加中转机</button>
+        <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加落地机 (SS)</button>
+        <button data-action="jump-migrate">⇩ 3x-ui 批量归并</button>
+      </div>
+    </section>
+
     ${ov.local3xuiExists ? `
       <div class="notice" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
         <div><b>检测到本机存在可迁移备份数据 (/etc/x-ui/x-ui.db 或 /root/3xui_backup.tar.gz)</b> · 可一键备份迁移全部入站节点、客户端凭据、路由转发、中转出站与 SSL 证书，不影响现有客户连接。</div>
@@ -666,10 +692,10 @@ function renderCluster() {
         </div>
 
         <div class="node-meta">
-          <div><span class="muted">承载入站/客户</span><br><b>${n.inboundsCount || 0} 节点 / ${n.clientsCount || 0} 客户</b></div>
-          <div><span class="muted">CPU / 内存</span><br><b>${n.metrics?.cpuPct ?? 1.5}% / ${n.metrics?.memUsedMB ?? 26} MB</b></div>
-          <div><span class="muted">累计流量</span><br><b>↑${fmtBytes(n.upTotal || 0)} ↓${fmtBytes(n.downTotal || 0)}</b></div>
-          <div><span class="muted">热备容灾绑定</span><br><b>${activeFoObj ? `⚠ 已漂移至 ${esc(activeFoObj.name)}` : (standbyObj ? `🛡 备机: ${esc(standbyObj.name)}${n.mirrorStandby ? ' (实时热备)' : ''}` : '未绑定备机')}</b></div>
+          <div><span>承载入站 / 客户数</span><b>${n.inboundsCount || 0} 节点 · ${n.clientsCount || 0} 客户</b></div>
+          <div><span>CPU / 常驻内存</span><b>${n.metrics?.cpuPct ?? 1.5}% · ${n.metrics?.memUsedMB ?? 24} MB</b></div>
+          <div><span>节点累计总流量</span><b>↑${fmtBytes(n.upTotal || 0)} / ↓${fmtBytes(n.downTotal || 0)}</b></div>
+          <div><span>秒级热备容灾状态</span><b>${activeFoObj ? `⚠ 已接管至 ${esc(activeFoObj.name)}` : (standbyObj ? `🛡 备机: ${esc(standbyObj.name)}${n.mirrorStandby ? ' (已预热)' : ''}` : '未绑定热备机')}</b></div>
         </div>
 
         ${n.role === 'exit' || n.exitConfig?.enabled ? `
@@ -1015,6 +1041,15 @@ function renderInbounds() {
         <button data-action="batch-inbounds" data-batch="enable-all">✓ 批量启用</button>
         <button data-action="batch-inbounds" data-batch="reset-all-traffic">↻ 批量重置流量</button>
       </div>
+    </div>
+
+    <div class="node-filter-bar">
+      <span style="font-size:12px;font-weight:750;color:var(--muted);margin-right:4px">🖥 按中转服务器筛选:</span>
+      <button class="filter-pill ${nf === 'all' ? 'active' : ''}" data-action="filter-node" data-node="all">全部服务器 (${state.inbounds.length})</button>
+      ${(state.nodes || []).filter((n) => n.role !== 'exit').map((n) => {
+        const cnt = state.inbounds.filter((i) => (i.nodeId || 'node_local') === n.id).length;
+        return `<button class="filter-pill ${nf === n.id ? 'active' : ''}" data-action="filter-node" data-node="${esc(n.id)}">${esc(n.name)}${n.domain ? ` (${esc(n.domain)})` : ''} [${cnt}]</button>`;
+      }).join('')}
     </div>
 
     <div class="quick-bar">
@@ -3236,6 +3271,7 @@ document.addEventListener('click', async (e) => {
 
   try {
     if (action === 'jump-migrate') { setPage('migrate'); }
+    else if (action === 'jump-cluster') { setPage('cluster'); }
     else if (action === 'Switch-to-outbounds') { setPage('outbounds'); }
     else if (action === 'Switch-to-routing') { setPage('routing'); }
     else if (action === 'filter-proto') {

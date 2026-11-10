@@ -60,7 +60,7 @@ const {
 const { triggerNodeFailover, triggerNodeFailback, updateCloudflareDnsIp } = require('./lib/failover');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '5.1.0';
+const VERSION = '1.0.0';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -2625,7 +2625,7 @@ function startPanelServer(callback) {
   activeServer = server;
 
   server.listen(port, host, () => {
-    console.log(`[NexusGate · 枢门 v${VERSION}] 面板已启动: ${proto}://${host}:${port}${basePath === '/' ? '/' : `${basePath}/`}`);
+    console.log(`[NexusGate Plus · 枢门集群 v${VERSION}] 面板已启动: ${proto}://${host}:${port}${basePath === '/' ? '/' : `${basePath}/`}`);
     try {
       if (fs.existsSync(singbox.getBinPath())) {
         singbox.reloadIfChanged();

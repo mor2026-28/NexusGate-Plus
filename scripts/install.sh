@@ -23,7 +23,7 @@ else
 fi
 
 die() { echo -e "${red}[错误]${plain} $*" >&2; exit 1; }
-info() { echo -e "${cyan}[NexusGate]${plain} $*"; }
+info() { echo -e "${cyan}[NexusGate Plus]${plain} $*"; }
 ok() { echo -e "${green}[成功]${plain} $*"; }
 warn() { echo -e "${yellow}[提示]${plain} $*"; }
 
@@ -267,7 +267,7 @@ EOF
 
     if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
       echo ""
-      echo -e "${cyan}=== NexusGate · 枢门 v3.9 已生成本机专属高强度随机登录凭据 ===${plain}"
+      echo -e "${cyan}=== NexusGate Plus · 枢门集群 v1.0.0 已生成本机专属高强度随机登录凭据 ===${plain}"
       echo -e "  • 随机面板端口 : ${yellow}${default_port}${plain}"
       echo -e "  • 随机管理账号 : ${green}${default_user}${plain}"
       echo -e "  • 随机高强密码 : ${green}${default_pass}${plain} (18位大小写字母+数字高强度混合)"
@@ -348,7 +348,7 @@ EOF
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate · 枢门 v3.9 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate Plus · 枢门集群 v1.0.0 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 访问地址   : ${cyan}${login_url}${plain}"
   echo -e " 登录账号   : ${green}${admin_user}${plain}"

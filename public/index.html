@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta name="theme-color" content="#f3f6fb">
-  <title>NexusGate Plus · 枢门集群</title>
-  <link rel="stylesheet" href="/styles.css?v=5.1.0">
+  <meta name="theme-color" content="#f4f7fc">
+  <title>NexusGate Plus · 枢门集群 (v1.0.0)</title>
+  <link rel="stylesheet" href="/styles.css?v=1.0.0">
   <script>window.__NG_BASE_PATH__ = "/";</script>
 </head>
 <body>
@@ -15,17 +15,20 @@
       <button class="theme-button login-theme" type="button" data-theme-toggle aria-label="切换主题">☀ 浅色</button>
       <div class="login-card">
         <div class="brand login-brand">
-          <span class="brand-mark">N</span>
-          <span><b>NexusGate Plus · 枢门集群</b><small>MULTI-RELAY &amp; EXIT CLUSTER v6.0</small></span>
+          <span class="brand-mark">N+</span>
+          <span>
+            <b>NexusGate Plus</b>
+            <small>枢门集群主控 · v1.0.0</small>
+          </span>
         </div>
         <div class="login-copy">
-          <h1>欢迎回来</h1>
-          <p class="muted" style="margin-top:6px;font-size:13px">轻量级全协议节点、链式中转与分流管理面板</p>
+          <h1>欢迎登录主控台</h1>
+          <p class="muted" style="margin-top:6px;font-size:13px">一主控统管多域名中转、共享落地 SS 池、3x-ui 无损归并与秒级容灾</p>
         </div>
         <form id="login-form" class="stack login-form">
-          <label>登录账号<input name="username" autocomplete="username" placeholder="请输入管理员账号" required></label>
-          <label>登录密码<input name="password" type="password" autocomplete="current-password" placeholder="请输入登录密码" required></label>
-          <button class="primary full large" type="submit">登录控制台</button>
+          <label>管理员账号<input name="username" autocomplete="username" placeholder="请输入管理员账号" required></label>
+          <label>管理员密码<input name="password" type="password" autocomplete="current-password" placeholder="请输入登录密码" required></label>
+          <button class="primary full large" type="submit">进入集群主控台 →</button>
         </form>
         <p id="login-error" class="form-error"></p>
       </div>
@@ -35,19 +38,22 @@
   <div id="app" class="app-shell hidden">
     <aside class="sidebar" id="sidebar">
       <div class="brand sidebar-brand">
-        <span class="brand-mark small">N</span>
-        <span><b>NexusGate Plus · 枢门集群</b><small>MULTI-RELAY &amp; EXIT CLUSTER v6.0</small></span>
+        <span class="brand-mark small">N+</span>
+        <span>
+          <b>NexusGate Plus</b>
+          <small>枢门集群主控 · v1.0.0</small>
+        </span>
       </div>
-      <p class="nav-caption">监控与内核</p>
+      <p class="nav-caption">全局监控与集群</p>
       <nav id="nav">
         <button data-page="overview" class="active"><span class="nav-icon">▦</span><span class="nav-label">系统与内核总览</span></button>
         <button data-page="cluster"><span class="nav-icon">❖</span><span class="nav-label">中转与落地集群</span></button>
-        <p class="nav-caption nav-group">节点与中转编排</p>
+        <p class="nav-caption nav-group">节点与多机转发</p>
         <button data-page="inbounds"><span class="nav-icon">◫</span><span class="nav-label">入站节点管理</span></button>
         <button data-page="routing"><span class="nav-icon">◇</span><span class="nav-label">路由规则 (转发)</span></button>
-        <button data-page="outbounds"><span class="nav-icon">⇄</span><span class="nav-label">出站规则 (中转)</span></button>
-        <p class="nav-caption nav-group">迁移与运维</p>
-        <button data-page="migrate"><span class="nav-icon">⇩</span><span class="nav-label">备份迁移</span></button>
+        <button data-page="outbounds"><span class="nav-icon">⇄</span><span class="nav-label">出站规则 (落地池)</span></button>
+        <p class="nav-caption nav-group">无损迁移与安全</p>
+        <button data-page="migrate"><span class="nav-icon">⇩</span><span class="nav-label">备份迁移 (3x-ui)</span></button>
         <button data-page="certificates"><span class="nav-icon">◎</span><span class="nav-label">SSL 证书与订阅</span></button>
         <button data-page="settings"><span class="nav-icon">⚙</span><span class="nav-label">面板设置与安全</span></button>
       </nav>
@@ -61,7 +67,7 @@
       <header class="topbar">
         <button id="menu-toggle" class="icon-button mobile-only" type="button" aria-label="展开菜单">☰</button>
         <div class="title-block">
-          <p id="breadcrumb" class="eyebrow">NexusGate · 枢门 / 系统与内核总览</p>
+          <p id="breadcrumb" class="eyebrow">NexusGate Plus · v1.0.0 / 系统与内核总览</p>
           <h1 id="page-title">系统与内核总览</h1>
         </div>
         <div class="top-actions">
@@ -89,7 +95,7 @@
     </section>
   </dialog>
   <div id="toasts" aria-live="polite"></div>
-  <script src="/vendor/qrcode.js?v=5.1.0" defer></script>
-  <script src="/app.js?v=5.1.0" defer></script>
+  <script src="/vendor/qrcode.js?v=1.0.0" defer></script>
+  <script src="/app.js?v=1.0.0" defer></script>
 </body>
 </html>

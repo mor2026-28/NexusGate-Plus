@@ -1984,7 +1984,7 @@ test('20. v5.1 Deep Audit: Bi-Directional Single-Client <-> Inbound Sync, HY2/An
 });
 
 
-test('21. NexusGate Plus v6.0 Cluster Architecture: Multi-Relay Independent Domains, Shared Exit SS Pool, Multi-3x-ui Lossless Merger & 1-Click Standby Failover', async () => {
+test('21. NexusGate Plus v1.0.0 Cluster Architecture: Multi-Relay Independent Domains, Shared Exit SS Pool, Multi-3x-ui Lossless Merger & 1-Click Standby Failover', async () => {
   const { compileNodeSingboxConfig, ensureClusterNodes, syncExitNodeOutbounds } = require('../lib/cluster');
   const { triggerNodeFailover, triggerNodeFailback } = require('../lib/failover');
 
