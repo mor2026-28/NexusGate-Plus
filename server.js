@@ -67,7 +67,7 @@ const {
 } = require('./lib/failover');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '1.0.2';
+const VERSION = '1.0.3';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -78,6 +78,9 @@ sessions.setMaxAgeMinutes(store.state.settings.sessionMaxAge || 720);
 const singbox = new SingboxManager(store);
 const loginAttempts = new Map();
 let activeServer = null;
+let _bgApplyQueued = false;
+let _bgHadConfigChange = false;
+const _bgPendingPorts = new Set();
 
 function getActiveRealCert(st = store.state) {
   const certs = st.certificates || [];
@@ -394,6 +397,54 @@ function handleCliCommand(args) {
   if (cmd === '--cleanup-memory') {
     const res = cleanupSystemLogsAndMemory(singbox, store);
     console.log(`已完成日志清理与内存释放: ${res.actions.join(', ')}`);
+    return;
+  }
+  if (cmd === '--export-backup' || cmd === '--backup') {
+    const targetFile = args[1] || `/root/nexusgate-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    try {
+      fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+      fs.writeFileSync(targetFile, JSON.stringify(store.state, null, 2), { mode: 0o600 });
+      console.log(`已成功将全集群配置备份导出至: ${targetFile}`);
+    } catch (err) {
+      console.error(`导出备份失败: ${err.message}`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (cmd === '--restore-backup' || cmd === '--restore') {
+    const sourceFile = args[1];
+    if (!sourceFile || !fs.existsSync(sourceFile)) {
+      console.error(`未找到备份文件: ${sourceFile || '未提供路径'}`);
+      process.exit(1);
+    }
+    try {
+      const content = fs.readFileSync(sourceFile, 'utf8');
+      const data = JSON.parse(content);
+      if (!data || !Array.isArray(data.inbounds) || !Array.isArray(data.outbounds)) {
+        throw new Error('备份文件结构无效');
+      }
+      store.transact((st) => {
+        if (Array.isArray(data.nodes) && data.nodes.length > 0) st.nodes = data.nodes;
+        st.inbounds = data.inbounds;
+        st.outbounds = data.outbounds;
+        if (data.routing) st.routing = data.routing;
+        if (data.dns) st.dns = data.dns;
+        if (Array.isArray(data.certificates)) st.certificates = data.certificates;
+        if (Array.isArray(data.failoverLogs)) st.failoverLogs = data.failoverLogs;
+        if (Array.isArray(data.migrations)) st.migrations = data.migrations;
+        if (data.settings?.cfApiToken && !st.settings.cfApiToken) st.settings.cfApiToken = data.settings.cfApiToken;
+        ensureClusterNodes(st);
+        syncExitNodeOutbounds(st);
+        syncRoutingRulesToInbounds(st);
+        store.addAudit('cli', 'restore_backup', `CLI 恢复 ${st.nodes.length} 台服务器与 ${st.inbounds.length} 个入站`);
+      });
+      const restoredPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
+      autoApplyIfEnabled(restoredPorts);
+      console.log(`已成功从 ${sourceFile} 恢复全集群数据: ${store.state.nodes.length} 台服务器, ${store.state.inbounds.length} 个入站, ${store.state.outbounds.length} 个出站`);
+    } catch (err) {
+      console.error(`恢复备份失败: ${err.message}`);
+      process.exit(1);
+    }
     return;
   }
   if (cmd === '--init-panel') {
@@ -972,9 +1023,7 @@ function enrichInboundWithLinks(inbound, reqHost = '') {
   };
 }
 
-let _bgApplyQueued = false;
-let _bgHadConfigChange = false;
-const _bgPendingPorts = new Set();
+
 
 function autoApplyIfEnabled(portsToOpen = []) {
   // 1. Always write config.json synchronously (< 2ms) so disk state is immediately consistent

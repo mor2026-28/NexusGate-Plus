@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.2)
+ * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.3)
  * Zero external npm dependencies · < 15 MB RAM footprint
  * Supports Relay Node, Exit Node (SS/SS2022/VMess), and Hot-Standby Failover Node.
  * Features:
@@ -309,7 +309,7 @@ const server = http.createServer((req, res) => {
 
 if (require.main === module) {
   server.listen(cfg.port, '0.0.0.0', () => {
-    console.log(`[NexusGate-Agent v1.0.2] Listening on 0.0.0.0:${cfg.port} (Node: ${cfg.nodeId})`);
+    console.log(`[NexusGate-Agent v1.0.3] Listening on 0.0.0.0:${cfg.port} (Node: ${cfg.nodeId})`);
     sendHeartbeat();
     setInterval(sendHeartbeat, 10000).unref();
     setInterval(() => {

@@ -467,7 +467,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.2 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.3 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -1866,6 +1866,40 @@ function renderCertificates() {
                 ② 在弹窗顶部下拉框直接选择那台中转机的域名（如 <code>jp2.yourdomain.com</code>），申请模式选择「<b>2. Cloudflare DNS API 模式</b>」（会自动带入你保存的 CF Token）；<br>
                 ③ 点击开始签发：主控会通过 Cloudflare DNS 接口完成验证并签发受信任证书，随后<b>自动将证书文件 (<code>fullchain.pem</code> 与 <code>privkey.pem</code>) 加密推送到那台中转机和备用机上</b>！</li>
               <li>如果你是通过《备份迁移》上传了原 3x-ui 的 <code>.tar.gz</code> 备份包（内含 <code>/root/cert</code>），主控也会自动提取里面的证书并同步分发给对应的中转机与热备机！</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>五、自动容灾的触发条件是什么？会不会误判？如何一键导入/导出全集群备份？</h2>
+          <p>容灾双重判定机制、纯手动 vs 自动模式切换、Web 与 SSH 终端备份导出/恢复权威说明</p>
+        </div>
+        <span class="status valid">双重探测防误切 · Web/SSH 一键备份</span>
+      </div>
+      <div class="panel-body">
+        <div class="grid-2">
+          <div style="padding:14px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);font-size:13px;line-height:1.7">
+            <b style="color:var(--primary);font-size:14px">1. 自动容灾触发条件是什么？会不会因为网络偶发抖动而误切？</b>
+            <ul style="margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
+              <li><b>核心判定机制（双重存活验证）</b>：<br>
+                ① <b>心跳持续超时</b>：受控端 Agent 每 10 秒向主控上报一次心跳；只有当某台主力机连续持续达到设定的分钟数（如默认 3 分钟）没有任何心跳时，才会进入容灾候选状态；<br>
+                ② <b>主控主动反向探测确认</b>：在触发切换前，主控会主动向该机器的 Agent 端口发起双重探活；如果只是单向网络临时丢包但机器仍能连通，<b>绝对不会切</b>！只有双重探测均失败、确认 VPS 宕机或网络中断时才会触发切换。<br>
+                ③ <b>支持完全关闭自动模式</b>：在编辑中转机时，你可在「断线容灾切换模式」下拉框直接选择「<b>🔒 仅手动切换模式</b>」——平时绝不自动动 IP，只有需要时由你在面板上点击「<b>⚡ 一键容灾切换</b>」才切，彻底杜绝误判！</li>
+            </ul>
+          </div>
+          <div style="padding:14px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);font-size:13px;line-height:1.7">
+            <b style="color:var(--success);font-size:14px">2. 面板集群备份如何导出和导入？SSH 命令行能一键备份吗？</b>
+            <ul style="margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
+              <li><b>Web 页面一键导出与导入</b>：<br>
+                • <b>导出</b>：在《面板设置与安全》点击顶部蓝色的「<b>⬇ 导出完整面板备份 (.json)</b>」，直接下载保存到本地；<br>
+                • <b>导入</b>：点击旁边的「<b>⬆ 导入恢复备份</b>」，弹窗内直接点击「<b>📁 点击直接选择 nexusgate-backup.json 文件</b>」即可一键上传恢复，无需手动复制粘贴！</li>
+              <li><b>SSH 终端命令行一键备份与恢复</b>：<br>
+                • 终端输入 <code>ng</code> 呼出管理菜单，输入 <b>3</b> 即可一键导出备份至 <code>/root/nexusgate-backup-日期.json</code>；<br>
+                • 也可以直接执行：<code>ng backup</code>（一键备份）或 <code>ng restore &lt;备份文件路径&gt;</code>（一键无损还原全集群数据）！</li>
             </ul>
           </div>
         </div>
@@ -3559,14 +3593,15 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
           </select>
         </label>
         <label>
-          断线多久自动触发容灾切换 (双重主动探测防误报)
-          <select name="autoFailoverMinutes">
-            <option value="1"${selected('1', String(n.autoFailoverMinutes || 3))}>连续断线 1 分钟自动切换备用机 (极速敏感)</option>
-            <option value="2"${selected('2', String(n.autoFailoverMinutes || 3))}>连续断线 2 分钟自动切换备用机</option>
-            <option value="3"${selected('3', String(n.autoFailoverMinutes || 3))}>连续断线 3 分钟自动切换备用机 (默认推荐 · 防网络抖动误判)</option>
-            <option value="5"${selected('5', String(n.autoFailoverMinutes || 3))}>连续断线 5 分钟自动切换备用机</option>
-            <option value="10"${selected('10', String(n.autoFailoverMinutes || 3))}>连续断线 10 分钟自动切换备用机</option>
-            <option value="15"${selected('15', String(n.autoFailoverMinutes || 3))}>连续断线 15 分钟自动切换备用机</option>
+          断线容灾切换模式 (支持纯手动一键切换，或设定断线超时自动切换)
+          <select name="autoFailoverMinutes" id="cluster-autofo-mode-select">
+            <option value="0"${selected('0', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>🔒 仅手动切换模式 (关闭自动切换 · 平时绝不自动动IP，需要时由人工点击【⚡一键容灾切换】)</option>
+            <option value="1"${selected('1', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 1 分钟自动切换 (极速敏感)</option>
+            <option value="2"${selected('2', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 2 分钟自动切换</option>
+            <option value="3"${selected('3', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 3 分钟自动切换 (推荐 · 双重探测防网络抖动误判)</option>
+            <option value="5"${selected('5', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 5 分钟自动切换</option>
+            <option value="10"${selected('10', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 10 分钟自动切换</option>
+            <option value="15"${selected('15', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 15 分钟自动切换</option>
           </select>
         </label>
         <label>
@@ -3578,12 +3613,8 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
           <input name="cfZoneId" type="text" autocomplete="off" spellcheck="false" value="${esc(safeZoneId)}" placeholder="留空即可全自动按域名识别 Zone ID (无需填)">
         </label>
         <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
-          <input type="checkbox" name="autoFailover" style="width:16px;min-height:16px" ${n.autoFailover !== false ? 'checked' : ''}>
-          <span><b>开启断线超时自动容灾切换 (Auto Failover)</b>：当主力中转机连续断线达到上方设定分钟数且主动探测确认宕机时，无需人工干预，自动由备用机接管并调用 Cloudflare API 切换解析 IP！</span>
-        </label>
-        <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
           <input type="checkbox" name="autoFailback" style="width:16px;min-height:16px" ${n.autoFailback ? 'checked' : ''}>
-          <span><b>开启主力机恢复自动回切 (Auto Failback)</b>：当主力中转机恢复在线后，自动将流量与 Cloudflare DNS 解析切回主力机（不勾选则保持在备用机，由你确认稳定后手动点击回切）</span>
+          <span><b>开启主力机恢复自动回切 (Auto Failback)</b>：当主力中转机恢复在线后，自动将流量与 Cloudflare DNS 解析切回主力机（不勾选则保持在备用机，由你确认稳定后再手动点击回切）</span>
         </label>
       </div>
 
@@ -4588,18 +4619,47 @@ document.addEventListener('click', async (e) => {
       if (el) el.value = genRandomAlnum(18, userVal);
     }
     else if (action === 'restore-backup-modal') {
-      openModal('导入恢复面板备份', '粘贴备份 JSON 内容', `
+      openModal('导入恢复集群面板备份', '一键选择已导出的 nexusgate-backup.json 备份文件 (或直接粘贴 JSON 内容)', `
         <form id="restore-backup-form" class="form-grid">
-          <label class="wide">
-            备份 JSON 内容
-            <textarea name="backupJson" style="min-height:200px" required placeholder='粘贴导出的 nexusgate-backup.json 内容'></textarea>
+          <div class="wide" style="padding:10px 14px;border-radius:10px;background:var(--primary-soft);border:1px solid color-mix(in srgb,var(--primary) 30%,var(--line));font-size:12.5px;line-height:1.6">
+            💡 <b>一键文件导入</b>：点击下方文件选择框，直接选中你下载保存的 <code>nexusgate-backup.json</code> 文件即可自动解析；系统将完整恢复全集群中转机、落地机、热备容灾拓扑、全部入站节点、出站池及 SSL 证书！
+          </div>
+
+          <label class="upload-dropzone wide" for="restore-file-input" style="padding:18px 14px;cursor:pointer">
+            <input type="file" id="restore-file-input" accept=".json,application/json" class="hidden">
+            <b style="display:block;font-size:14px;margin-bottom:4px">📁 点击直接选择 <code>nexusgate-backup.json</code> 备份文件</b>
+            <span class="muted" style="font-size:12px" id="restore-file-label">支持从电脑/手机选择已导出的完整集群备份 JSON 文件（选择后自动填入并解析）</span>
           </label>
+
+          <label class="wide">
+            或直接粘贴备份 JSON 文本内容 (可选备用)
+            <textarea name="backupJson" id="restore-json-textarea" style="min-height:120px" placeholder='选择上方文件自动填充，或在此直接粘贴导出的 JSON 备份内容'></textarea>
+          </label>
+
           <div class="form-actions">
             <button type="button" data-close>取消</button>
-            <button type="submit" class="primary">立即恢复备份</button>
+            <button type="submit" class="primary" id="restore-submit-btn">立即恢复全集群配置</button>
           </div>
         </form>
       `);
+
+      const fInput = $('#restore-file-input');
+      const tArea = $('#restore-json-textarea');
+      const lbl = $('#restore-file-label');
+      if (fInput) {
+        fInput.addEventListener('change', async () => {
+          const file = fInput.files?.[0];
+          if (!file) return;
+          try {
+            const txt = await file.text();
+            if (tArea) tArea.value = txt;
+            if (lbl) lbl.textContent = `✓ 已读取文件: ${file.name} (${fmtBytes(file.size)})`;
+            toast(`已读取备份文件 [${file.name}]，点击【立即恢复全集群配置】即可生效`);
+          } catch (err) {
+            toast(`读取文件失败: ${err.message}`, true);
+          }
+        });
+      }
     }
   } catch (err) {
     toast(err.message, true);
@@ -4825,8 +4885,8 @@ document.addEventListener('submit', async (e) => {
         exitEnabled: isExitLike,
         standbySyncMode: syncMode,
         mirrorStandby: syncMode !== 'on_failover',
-        autoFailover: Boolean(form.querySelector('input[name="autoFailover"]')?.checked),
-        autoFailoverMinutes: Number(data.autoFailoverMinutes || 3),
+        autoFailover: Number(data.autoFailoverMinutes || 3) > 0,
+        autoFailoverMinutes: Math.max(1, Number(data.autoFailoverMinutes || 3)),
         autoFailback: Boolean(form.querySelector('input[name="autoFailback"]')?.checked),
         fallbackExitNodeId: isExitLike ? (data.fallbackExitNodeId || '') : ''
       };
@@ -4938,10 +4998,21 @@ document.addEventListener('submit', async (e) => {
       showLogin();
     }
     else if (form.id === 'restore-backup-form') {
-      await api('/api/restore', { method: 'POST', body: JSON.stringify({ backup: JSON.parse(data.backupJson) }) });
+      const rawJson = (data.backupJson || '').trim();
+      if (!rawJson) {
+        throw new Error('请先选择备份文件或粘贴备份 JSON 内容');
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(rawJson);
+      } catch (err) {
+        throw new Error('备份文件格式有误，无法解析为有效 JSON');
+      }
+      toast('正在恢复全集群配置与节点数据...');
+      const res = await api('/api/restore', { method: 'POST', body: JSON.stringify({ backup: parsed }) });
       closeModal();
-      toast('面板备份已恢复！');
-      load('settings');
+      toast(`🎉 全集群备份已成功恢复！共恢复 ${res.nodesCount || 0} 台服务器、${res.inboundsCount || 0} 个入站节点与 ${res.outboundsCount || 0} 个出站！`);
+      load('overview');
     }
   } catch (err) {
     if (form.id === 'login-form') $('#login-error').textContent = err.message;

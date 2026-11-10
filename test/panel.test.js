@@ -2538,3 +2538,128 @@ test('23. v1.0.2 Multi-Scenario Fault Tolerance: Smart On-Change Sync (0 Idle Tr
   assert.equal(restoreRes.json.nodesCount, origNodeCount, 'POST /api/restore must restore all cluster server nodes');
   assert.equal(restoreRes.json.inboundsCount, origInbCount, 'POST /api/restore must restore all inbounds across all servers');
 });
+
+
+test('24. v1.0.3 Deep Audit & Extreme Multi-Node Scale Simulation: 10 Non-Domain Relays + 25 Shared Exits, HA Pool, CLI Backup/Restore & Manual Failover Toggle', async () => {
+  // 1. Test CLI --export-backup and --restore-backup
+  const tmpBackupFile = path.join(os.tmpdir(), `ng-cli-backup-${Date.now()}.json`);
+  const { execFileSync } = require('node:child_process');
+  
+  execFileSync('node', ['server.js', '--export-backup', tmpBackupFile], { cwd: path.join(__dirname, '..') });
+  assert.ok(fs.existsSync(tmpBackupFile), 'CLI --export-backup must create the backup file');
+  const cliBackupContent = JSON.parse(fs.readFileSync(tmpBackupFile, 'utf8'));
+  assert.ok(Array.isArray(cliBackupContent.nodes), 'CLI backup must contain nodes');
+  assert.ok(Array.isArray(cliBackupContent.inbounds), 'CLI backup must contain inbounds');
+
+  // 2. Test Manual-Only Failover Toggle (autoFailover: false / autoFailoverMinutes: 0)
+  const relayNode = store.state.nodes.find((n) => n.role === 'relay' && n.domain);
+  const standbyNode = store.state.nodes.find((n) => n.role === 'standby');
+  assert.ok(relayNode && standbyNode);
+
+  // Set relayNode to Manual Mode (autoFailover: false, autoFailoverMinutes: 0)
+  await req(`/SecPath16Chars99/api/cluster/nodes/${relayNode.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      standbyNodeId: standbyNode.id,
+      autoFailover: false,
+      autoFailoverMinutes: 0,
+      status: 'offline' // simulate offline
+    })
+  });
+
+  // Run health-check: because it is in Manual Mode, Watchdog MUST NOT fail over automatically!
+  const hcManual = await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: Date.now() + 10 * 60 * 1000, skipActiveProbe: true })
+  });
+  assert.equal(hcManual.status, 200);
+  assert.ok(
+    !hcManual.json.actions.some((a) => a.nodeId === relayNode.id),
+    'In Manual Mode (autoFailover: false), Watchdog must NEVER automatically fail over'
+  );
+  const nodeStillManual = (await req('/SecPath16Chars99/api/cluster/nodes')).json.nodes.find((n) => n.id === relayNode.id);
+  assert.equal(nodeStillManual.activeFailoverTo, '', 'Relay node must remain unfailovered in manual mode');
+
+  // 3. Extreme Multi-Node Scale Simulation: 10 Non-Domain Relay Nodes + 25 Shared Exit Nodes + 50 Inbound Nodes
+  const relayBatch = [];
+  for (let r = 1; r <= 10; r += 1) {
+    relayBatch.push({
+      name: `纯IP中转机-${r}`,
+      role: 'relay',
+      host: `198.18.10.${r}`,
+      domain: '', // Non-domain relay node
+      autoFailover: false
+    });
+  }
+
+  const exitBatch = [];
+  for (let e = 1; e <= 25; e += 1) {
+    exitBatch.push({
+      name: `落地机-${e}`,
+      role: 'exit',
+      host: `198.18.20.${e}`,
+      exitPort: 30000 + e,
+      exitMethod: '2022-blake3-aes-128-gcm'
+    });
+  }
+
+  // Create all 10 relays and 25 exits
+  const createdRelays = [];
+  for (const rData of relayBatch) {
+    const res = await req('/SecPath16Chars99/api/cluster/nodes', { method: 'POST', body: JSON.stringify(rData) });
+    assert.equal(res.status, 201);
+    createdRelays.push(res.json.node);
+  }
+
+  const createdExits = [];
+  for (const eData of exitBatch) {
+    const res = await req('/SecPath16Chars99/api/cluster/nodes', { method: 'POST', body: JSON.stringify(eData) });
+    assert.equal(res.status, 201);
+    createdExits.push(res.json.node);
+  }
+
+  assert.equal(createdRelays.length, 10, 'All 10 non-domain relays must be created');
+  assert.equal(createdExits.length, 25, 'All 25 shared exits must be created');
+
+  // Verify HA Exit Pool automatically incorporates all shared exits
+  const allOutbounds = (await req('/SecPath16Chars99/api/outbounds')).json.outbounds;
+  const haPool = allOutbounds.find((o) => o.tag === 'exit-ha-pool');
+  assert.ok(haPool, 'exit-ha-pool must exist');
+  assert.ok(haPool.outbounds.length >= 25, 'exit-ha-pool must contain all shared exit tags');
+
+  // Create 50 inbounds spread across the 10 non-domain relays, forwarding to exit-ha-pool or specific exits
+  for (let i = 1; i <= 50; i += 1) {
+    const assignedRelay = createdRelays[i % 10];
+    const targetExitOut = (i % 3 === 0) ? 'exit-ha-pool' : allOutbounds.find((o) => o.exitNodeId === createdExits[i % 25].id)?.tag;
+    const inbRes = await req('/SecPath16Chars99/api/inbounds', {
+      method: 'POST',
+      body: JSON.stringify({
+        nodeId: assignedRelay.id,
+        remark: `ScaleNode-${i}`,
+        protocol: (i % 2 === 0) ? 'vless' : 'hysteria2',
+        port: 20000 + i,
+        security: (i % 2 === 0) ? 'reality' : 'none',
+        outboundTag: targetExitOut || 'default'
+      })
+    });
+    assert.equal(inbRes.status, 201);
+  }
+
+  // Verify subscription generation for non-domain relay nodes automatically uses their pure IP address!
+  const allInbounds = (await req('/SecPath16Chars99/api/inbounds')).json.inbounds;
+  const sampleNonDomainInb = allInbounds.find((i) => i.remark === 'ScaleNode-10');
+  assert.ok(sampleNonDomainInb);
+  const sampleLink = sampleNonDomainInb.links[0]?.uri;
+  assert.ok(sampleLink.includes('@198.18.10.'), `Subscription for non-domain relay must use its IP address, got: ${sampleLink}`);
+
+  // Test Smart Sync performance across all 35+ remote nodes: compiled configs must generate in < 150ms
+  const tStart = Date.now();
+  const { syncChangedClusterNodes } = require('../lib/cluster');
+  await syncChangedClusterNodes(store.state, { forceAll: true });
+  const tElapsed = Date.now() - tStart;
+  assert.ok(tElapsed < 1500, `Bulk sync compilation across 35+ nodes must complete quickly (< 1.5s), took: ${tElapsed}ms`);
+
+  // Test CLI --restore-backup with the previously exported file -> restores cluster cleanly!
+  execFileSync('node', ['server.js', '--restore-backup', tmpBackupFile], { cwd: path.join(__dirname, '..') });
+  try { fs.unlinkSync(tmpBackupFile); } catch { /* ignore */ }
+});

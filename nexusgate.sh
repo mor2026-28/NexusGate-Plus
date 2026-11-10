@@ -585,7 +585,7 @@ EOF
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate Plus 面板与管理脚本已更新至 v1.0.2，所有节点与 Sing-box 内核已重新加载生效！"
+  ok "NexusGate Plus 面板与管理脚本已更新至 v1.0.3，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
   if [[ -r /dev/tty ]]; then
     pause_return
@@ -610,7 +610,7 @@ show_menu() {
   clear 2>/dev/null || true
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
-  ${cyan}║${plain}     ${green}         NexusGate Plus · 枢门集群 面板管理脚本 (v1.0.2)         ${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${green}         NexusGate Plus · 枢门集群 面板管理脚本 (v1.0.3)         ${plain}      ${cyan}║${plain}
   ${cyan}║${plain}     ${yellow}全协议节点编排 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}          ${cyan}║${plain}
   ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
   ${green}0.${plain} 退出脚本
@@ -658,7 +658,7 @@ show_menu() {
     0) exit 0 ;;
     1) bash "$INSTALL_DIR/install.sh" ;;
     2) update_panel ; pause_return ;;
-    3) cp -f "$DATA_FILE" "/root/nexusgate-backup-$(date +%F).json" && ok "已备份至 /root/nexusgate-backup-$(date +%F).json" ; pause_return ;;
+    3) NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --export-backup "/root/nexusgate-backup-$(date +%F).json" && ok "已成功导出全集群完整备份至 /root/nexusgate-backup-$(date +%F).json (含全部中转机、落地机与证书)" ; pause_return ;;
     4) switch_singbox_version ; pause_return ;;
     5) uninstall_panel ;;
     6) change_account ; pause_return ;;
@@ -693,6 +693,20 @@ if [[ $# -gt 0 ]]; then
     restart) pkill -9 -f "sing-box run" 2>/dev/null || true ; systemctl reset-failed nexusgate.service nexusgate-singbox.service 2>/dev/null || true ; systemctl restart nexusgate.service nexusgate-singbox.service ;;
     status) systemctl status nexusgate.service nexusgate-singbox.service --no-pager ;;
     info|settings) show_info ;;
+    backup|export)
+      local bfile="${2:-/root/nexusgate-backup-$(date +%F).json}"
+      NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --export-backup "$bfile"
+      ok "全集群备份已导出至: $bfile"
+      ;;
+    restore|import)
+      local rfile="${2:-}"
+      [[ -n "$rfile" ]] || die "用法: ng restore <备份文件.json 路径>"
+      systemctl stop nexusgate.service 2>/dev/null || true
+      NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --restore-backup "$rfile"
+      systemctl start nexusgate.service 2>/dev/null || true
+      ok "全集群配置已从 $rfile 恢复成功！"
+      show_info
+      ;;
     clean|cleanup) cleanup_memory_and_logs ;;
     log|logs) journalctl -u nexusgate.service -u nexusgate-singbox.service -n 100 --no-pager ;;
     bbr) bbr_menu ;;
