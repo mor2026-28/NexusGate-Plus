@@ -1,8 +1,8 @@
 {
   "name": "nexusgate-plus",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
-  "description": "NexusGate Plus · 枢门集群 (v1.0.3) — 轻量级多中转/共享落地集群、3x-ui无损归并与秒级容灾主控面板",
+  "description": "NexusGate Plus · 枢门集群 (v1.0.4) — 轻量级多中转/共享落地集群、3x-ui无损归并与秒级容灾主控面板",
   "type": "commonjs",
   "engines": {
     "node": ">=18"

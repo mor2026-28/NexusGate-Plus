@@ -66,8 +66,13 @@ const {
   checkClusterHealthAndAutoFailover
 } = require('./lib/failover');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
+const {
+  buildMasterBackupZip,
+  extractMasterBackupPayload,
+  restoreBackupCertificatesToDisk
+} = require('./lib/zip');
 
-const VERSION = '1.0.3';
+const VERSION = '1.0.4';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -329,6 +334,104 @@ function syncRoutingRulesToInbounds(st) {
   }
 }
 
+function applyMasterRestore(data, certFiles = new Map(), options = {}) {
+  const { restorePanelSettings = true, actor = 'admin', certRoot = '' } = options;
+  if (!data || !Array.isArray(data.inbounds) || !Array.isArray(data.outbounds)) {
+    const err = new Error('备份文件结构无效（缺少 inbounds 或 outbounds）');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  restoreBackupCertificatesToDisk(data, certFiles, certRoot);
+
+  const prevPort = store.state.settings.webPort;
+  const prevBasePath = store.state.settings.webBasePath;
+  const prevCertFile = store.state.settings.webCertFile;
+  const localPublicIp = store.state.settings.publicIPv4 || '';
+
+  store.transact((st) => {
+    if (restorePanelSettings) {
+      if (data.admin && data.admin.username && data.admin.passwordHash) {
+        st.admin = {
+          ...st.admin,
+          ...data.admin
+        };
+      }
+      if (data.settings && typeof data.settings === 'object') {
+        const ds = data.settings;
+        if (ds.webPort) st.settings.webPort = Number(ds.webPort);
+        if (ds.webBasePath) st.settings.webBasePath = normalizeBasePath(ds.webBasePath);
+        if (ds.strictBasePath !== undefined) st.settings.strictBasePath = Boolean(ds.strictBasePath);
+        if (ds.webListen) st.settings.webListen = String(ds.webListen).trim();
+        if (ds.webDomain !== undefined) st.settings.webDomain = String(ds.webDomain || '').trim();
+        if (ds.defaultTlsDomain !== undefined) st.settings.defaultTlsDomain = String(ds.defaultTlsDomain || '').trim();
+        if (ds.webCertFile !== undefined) st.settings.webCertFile = String(ds.webCertFile || '').trim();
+        if (ds.webKeyFile !== undefined) st.settings.webKeyFile = String(ds.webKeyFile || '').trim();
+        if (ds.defaultCertFile !== undefined) st.settings.defaultCertFile = String(ds.defaultCertFile || '').trim();
+        if (ds.defaultKeyFile !== undefined) st.settings.defaultKeyFile = String(ds.defaultKeyFile || '').trim();
+        if (ds.subEnable !== undefined) st.settings.subEnable = Boolean(ds.subEnable);
+        if (ds.subPath) st.settings.subPath = normalizeBasePath(ds.subPath);
+        if (ds.subToken) st.settings.subToken = String(ds.subToken).trim();
+        if (ds.cfApiToken !== undefined) st.settings.cfApiToken = String(ds.cfApiToken || '').trim();
+        if (ds.trafficResetDay !== undefined) st.settings.trafficResetDay = Number(ds.trafficResetDay || 0);
+        if (ds.singboxLogLevel) st.settings.singboxLogLevel = ds.singboxLogLevel;
+        if (ds.autoApplyConfig !== undefined) st.settings.autoApplyConfig = Boolean(ds.autoApplyConfig);
+        if (!st.settings.publicIPv4 && ds.publicIPv4) st.settings.publicIPv4 = ds.publicIPv4;
+      }
+    } else if (data.settings?.cfApiToken && !st.settings.cfApiToken) {
+      st.settings.cfApiToken = data.settings.cfApiToken;
+    }
+
+    if (Array.isArray(data.nodes) && data.nodes.length > 0) {
+      st.nodes = data.nodes;
+      const localNode = st.nodes.find((n) => n.id === 'node_local' || n.isLocal);
+      if (localNode && localPublicIp && localPublicIp !== '127.0.0.1') {
+        localNode.host = localPublicIp;
+      }
+    }
+    st.inbounds = data.inbounds;
+    st.outbounds = data.outbounds;
+    if (data.routing) st.routing = data.routing;
+    if (data.dns) st.dns = data.dns;
+    if (Array.isArray(data.certificates)) st.certificates = data.certificates;
+    if (Array.isArray(data.failoverLogs)) st.failoverLogs = data.failoverLogs;
+    if (Array.isArray(data.migrations)) st.migrations = data.migrations;
+
+    ensureClusterNodes(st);
+    syncExitNodeOutbounds(st);
+    syncRoutingRulesToInbounds(st);
+    store.addAudit(
+      actor,
+      'restore_backup',
+      `全量恢复: 端口:${st.settings.webPort} 路径:${st.settings.webBasePath} (${st.nodes.length}台服务器 / ${st.inbounds.length}个入站 / ${st.certificates.length}张证书)`
+    );
+  });
+
+  const restoredPorts = [
+    store.state.settings.webPort,
+    ...(store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port)
+  ];
+  autoApplyIfEnabled(restoredPorts);
+
+  const needServerRestart =
+    store.state.settings.webPort !== prevPort ||
+    store.state.settings.webBasePath !== prevBasePath ||
+    store.state.settings.webCertFile !== prevCertFile;
+
+  return {
+    ok: true,
+    restarting: needServerRestart,
+    restoredPort: store.state.settings.webPort,
+    restoredBasePath: store.state.settings.webBasePath,
+    restoredDomain: store.state.settings.webDomain || '',
+    restoredUsername: store.state.admin.username,
+    nodesCount: store.state.nodes.length,
+    inboundsCount: store.state.inbounds.length,
+    outboundsCount: store.state.outbounds.length,
+    certificatesCount: (store.state.certificates || []).length
+  };
+}
+
 function getPanelInfoSummary() {
   const s = store.state.settings;
   const activeCert = getActiveRealCert(store.state);
@@ -400,11 +503,16 @@ function handleCliCommand(args) {
     return;
   }
   if (cmd === '--export-backup' || cmd === '--backup') {
-    const targetFile = args[1] || `/root/nexusgate-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    const targetFile = args[1] || `/root/nexusgate-master-backup-${new Date().toISOString().slice(0, 10)}.zip`;
     try {
       fs.mkdirSync(path.dirname(targetFile), { recursive: true });
-      fs.writeFileSync(targetFile, JSON.stringify(store.state, null, 2), { mode: 0o600 });
-      console.log(`已成功将全集群配置备份导出至: ${targetFile}`);
+      if (targetFile.toLowerCase().endsWith('.zip')) {
+        const zipBuf = buildMasterBackupZip(store, singbox);
+        fs.writeFileSync(targetFile, zipBuf, { mode: 0o600 });
+      } else {
+        fs.writeFileSync(targetFile, JSON.stringify(store.state, null, 2), { mode: 0o600 });
+      }
+      console.log(`已成功将全集群主控完整灾备包导出至: ${targetFile}`);
     } catch (err) {
       console.error(`导出备份失败: ${err.message}`);
       process.exit(1);
@@ -418,29 +526,10 @@ function handleCliCommand(args) {
       process.exit(1);
     }
     try {
-      const content = fs.readFileSync(sourceFile, 'utf8');
-      const data = JSON.parse(content);
-      if (!data || !Array.isArray(data.inbounds) || !Array.isArray(data.outbounds)) {
-        throw new Error('备份文件结构无效');
-      }
-      store.transact((st) => {
-        if (Array.isArray(data.nodes) && data.nodes.length > 0) st.nodes = data.nodes;
-        st.inbounds = data.inbounds;
-        st.outbounds = data.outbounds;
-        if (data.routing) st.routing = data.routing;
-        if (data.dns) st.dns = data.dns;
-        if (Array.isArray(data.certificates)) st.certificates = data.certificates;
-        if (Array.isArray(data.failoverLogs)) st.failoverLogs = data.failoverLogs;
-        if (Array.isArray(data.migrations)) st.migrations = data.migrations;
-        if (data.settings?.cfApiToken && !st.settings.cfApiToken) st.settings.cfApiToken = data.settings.cfApiToken;
-        ensureClusterNodes(st);
-        syncExitNodeOutbounds(st);
-        syncRoutingRulesToInbounds(st);
-        store.addAudit('cli', 'restore_backup', `CLI 恢复 ${st.nodes.length} 台服务器与 ${st.inbounds.length} 个入站`);
-      });
-      const restoredPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
-      autoApplyIfEnabled(restoredPorts);
-      console.log(`已成功从 ${sourceFile} 恢复全集群数据: ${store.state.nodes.length} 台服务器, ${store.state.inbounds.length} 个入站, ${store.state.outbounds.length} 个出站`);
+      const rawBuf = fs.readFileSync(sourceFile);
+      const { stateData, certFiles } = extractMasterBackupPayload(rawBuf);
+      const res = applyMasterRestore(stateData, certFiles, { restorePanelSettings: true, actor: 'cli' });
+      console.log(`已成功从 ${sourceFile} 恢复全集群主控数据: 面板端口=${res.restoredPort}, 安全路径=${res.restoredBasePath}, 服务器=${res.nodesCount}台, 入站=${res.inboundsCount}个, 证书=${res.certificatesCount}张`);
     } catch (err) {
       console.error(`恢复备份失败: ${err.message}`);
       process.exit(1);
@@ -2756,50 +2845,66 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { ok: true, message: '账号密码已更新，请重新登录' });
     }
 
-    // 15. Backup & Restore
+    // 15. Backup & Restore (Supports full .zip Master Disaster Recovery Archive with certs/port/path & .json)
     if (pathname === '/api/backup' && method === 'GET') {
-      const payload = JSON.stringify(store.state, null, 2);
+      const fmt = (url.searchParams.get('format') || 'json').toLowerCase();
+      const dateStr = new Date().toISOString().slice(0, 10);
+      if (fmt === 'zip') {
+        const zipBuf = buildMasterBackupZip(store, singbox);
+        res.writeHead(200, {
+          'content-type': 'application/zip',
+          'content-length': zipBuf.length,
+          'content-disposition': `attachment; filename="nexusgate-master-backup-${dateStr}.zip"`
+        });
+        res.end(zipBuf);
+        return;
+      }
+      const stateClone = JSON.parse(JSON.stringify(store.state));
+      for (const cert of stateClone.certificates || []) {
+        if (!cert.certPem && cert.certPath && fs.existsSync(cert.certPath)) {
+          try { cert.certPem = fs.readFileSync(cert.certPath, 'utf8'); } catch { /* ignore */ }
+        }
+        if (!cert.keyPem && cert.keyPath && fs.existsSync(cert.keyPath)) {
+          try { cert.keyPem = fs.readFileSync(cert.keyPath, 'utf8'); } catch { /* ignore */ }
+        }
+      }
+      const payload = JSON.stringify(stateClone, null, 2);
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
-        'content-disposition': `attachment; filename="nexusgate-backup-${new Date().toISOString().slice(0, 10)}.json"`
+        'content-disposition': `attachment; filename="nexusgate-backup-${dateStr}.json"`
       });
       res.end(payload);
       return;
     }
 
     if (pathname === '/api/restore' && method === 'POST') {
-      const body = await readJson(req);
-      const data = body.backup || body;
-      if (!data || !Array.isArray(data.inbounds) || !Array.isArray(data.outbounds)) {
-        return sendError(res, 400, '备份文件结构无效');
+      const cType = String(req.headers['content-type'] || '').toLowerCase();
+      let extracted;
+      let restorePanelSettings = true;
+      let certRoot = '';
+      if (cType.includes('application/zip') || cType.includes('application/octet-stream')) {
+        const rawBuf = await readRawBody(req, 64 * 1024 * 1024);
+        extracted = extractMasterBackupPayload(rawBuf);
+        if (url.searchParams.get('restorePanelSettings') === 'false') {
+          restorePanelSettings = false;
+        }
+      } else {
+        const body = await readJson(req);
+        if (body.restorePanelSettings === false) restorePanelSettings = false;
+        if (body.certRoot) certRoot = String(body.certRoot);
+        extracted = extractMasterBackupPayload(body);
       }
-      store.transact((st) => {
-        if (Array.isArray(data.nodes) && data.nodes.length > 0) {
-          st.nodes = data.nodes;
-        }
-        st.inbounds = data.inbounds;
-        st.outbounds = data.outbounds;
-        if (data.routing) st.routing = data.routing;
-        if (data.dns) st.dns = data.dns;
-        if (Array.isArray(data.certificates)) st.certificates = data.certificates;
-        if (Array.isArray(data.failoverLogs)) st.failoverLogs = data.failoverLogs;
-        if (Array.isArray(data.migrations)) st.migrations = data.migrations;
-        if (data.settings?.cfApiToken && !st.settings.cfApiToken) {
-          st.settings.cfApiToken = data.settings.cfApiToken;
-        }
-        ensureClusterNodes(st);
-        syncExitNodeOutbounds(st);
-        syncRoutingRulesToInbounds(st);
-        store.addAudit(session.username, 'restore_backup', `恢复 ${st.nodes.length} 台服务器、${st.inbounds.length} 个入站与 ${st.outbounds.length} 个出站`);
+
+      const result = applyMasterRestore(extracted.stateData, extracted.certFiles, {
+        restorePanelSettings,
+        actor: session.username,
+        certRoot
       });
-      const restoredPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
-      autoApplyIfEnabled(restoredPorts);
-      return sendJson(res, 200, {
-        ok: true,
-        nodesCount: store.state.nodes.length,
-        inboundsCount: store.state.inbounds.length,
-        outboundsCount: store.state.outbounds.length
-      });
+
+      if (result.restarting && activeServer && !process.env.NG_TEST_MODE) {
+        setTimeout(() => restartPanelServer(), 350);
+      }
+      return sendJson(res, 200, result);
     }
 
     return sendError(res, 404, `未找到接口: ${pathname}`, 'not_found');

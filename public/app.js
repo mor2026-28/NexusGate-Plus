@@ -467,7 +467,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.3 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.4 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -1895,8 +1895,8 @@ function renderCertificates() {
             <b style="color:var(--success);font-size:14px">2. 面板集群备份如何导出和导入？SSH 命令行能一键备份吗？</b>
             <ul style="margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
               <li><b>Web 页面一键导出与导入</b>：<br>
-                • <b>导出</b>：在《面板设置与安全》点击顶部蓝色的「<b>⬇ 导出完整面板备份 (.json)</b>」，直接下载保存到本地；<br>
-                • <b>导入</b>：点击旁边的「<b>⬆ 导入恢复备份</b>」，弹窗内直接点击「<b>📁 点击直接选择 nexusgate-backup.json 文件</b>」即可一键上传恢复，无需手动复制粘贴！</li>
+                • <b>导出</b>：在《面板设置与安全》点击顶部蓝色的「<b>📦 导出全量主控灾备包 (.zip)</b>」，直接下载保存到本地；<br>
+                • <b>导入</b>：点击旁边的「<b>⬆ 导入恢复备份</b>」，弹窗内直接点击「<b>📁 点击直接选择 nexusgate-master-backup.zip 文件</b>」即可一键上传恢复，无需手动复制粘贴！</li>
               <li><b>SSH 终端命令行一键备份与恢复</b>：<br>
                 • 终端输入 <code>ng</code> 呼出管理菜单，输入 <b>3</b> 即可一键导出备份至 <code>/root/nexusgate-backup-日期.json</code>；<br>
                 • 也可以直接执行：<code>ng backup</code>（一键备份）或 <code>ng restore &lt;备份文件路径&gt;</code>（一键无损还原全集群数据）！</li>
@@ -1918,8 +1918,9 @@ function renderSettings() {
   return `
     <div class="action-bar">
       <div class="action-bar-left">
-        <a class="button primary" href="${BASE_PATH}/api/backup" target="_blank">⬇ 导出完整面板备份 (.json)</a>
-        <button data-action="restore-backup-modal">⬆ 导入恢复备份</button>
+        <a class="button primary" href="${BASE_PATH}/api/backup?format=zip" target="_blank">📦 导出全量主控灾备包 (.zip · 含端口/安全路径/账密/SSL证书/全集群)</a>
+        <a class="button" href="${BASE_PATH}/api/backup?format=json" target="_blank">⬇ 导出纯配置 (.json)</a>
+        <button class="primary" data-action="restore-backup-modal">⬆ 一键导入恢复主控备份 (.zip / .json)</button>
       </div>
     </div>
 
@@ -2218,7 +2219,7 @@ function renderGuide() {
           <div class="gauge-card">
             <b style="font-size:13.5px;color:#7c3aed">3. 多台 3x-ui / X-Panel / NexusGate 无损归并</b>
             <p class="muted" style="margin:6px 0 0;font-size:12px;line-height:1.6">
-              • 在《备份迁移》选择目标中转机（或选「自动新建中转机」），上传原机器的 <code>x-ui.db</code>、<code>3xui_backup.tar.gz</code> 或 <code>nexusgate-backup.json</code>。<br>
+              • 在《备份迁移》选择目标中转机（或选「自动新建中转机」），上传原机器的 <code>x-ui.db</code>、<code>3xui_backup.tar.gz</code> 或 <code>nexusgate-master-backup.zip</code>。<br>
               • 不同中转机哪怕都有 <code>443</code> 等相同端口也会自动按机器隔离，多台机器共用的相同落地 SS 节点（相同 IP:端口）会自动去重合并，客户零感知！
             </p>
           </div>
@@ -4619,26 +4620,32 @@ document.addEventListener('click', async (e) => {
       if (el) el.value = genRandomAlnum(18, userVal);
     }
     else if (action === 'restore-backup-modal') {
-      openModal('导入恢复集群面板备份', '一键选择已导出的 nexusgate-backup.json 备份文件 (或直接粘贴 JSON 内容)', `
+      state._pendingRestoreZipBuf = null;
+      openModal('一键导入恢复全量主控备份 (.zip / .json)', '支持异机主控容灾迁移：端口、安全根路径、登录账密、SSL 证书文件与全集群节点 100% 原样还原', `
         <form id="restore-backup-form" class="form-grid">
           <div class="wide" style="padding:10px 14px;border-radius:10px;background:var(--primary-soft);border:1px solid color-mix(in srgb,var(--primary) 30%,var(--line));font-size:12.5px;line-height:1.6">
-            💡 <b>一键文件导入</b>：点击下方文件选择框，直接选中你下载保存的 <code>nexusgate-backup.json</code> 文件即可自动解析；系统将完整恢复全集群中转机、落地机、热备容灾拓扑、全部入站节点、出站池及 SSL 证书！
+            💡 <b>主控异机灾备恢复说明</b>：当原主控机器故障、你在新备用服务器上安装主控后，直接选择导出的 <code>nexusgate-master-backup.zip</code> 压缩包即可！系统会自动解压还原全部 <b>SSL 证书实体文件</b>、<b>全部中转机与落地机集群</b>、<b>所有客户节点与路由</b>，并将新主控的<b>访问端口、安全路径与登录账密</b>恢复为与原主控完全一致！
           </div>
 
           <label class="upload-dropzone wide" for="restore-file-input" style="padding:18px 14px;cursor:pointer">
-            <input type="file" id="restore-file-input" accept=".json,application/json" class="hidden">
-            <b style="display:block;font-size:14px;margin-bottom:4px">📁 点击直接选择 <code>nexusgate-backup.json</code> 备份文件</b>
-            <span class="muted" style="font-size:12px" id="restore-file-label">支持从电脑/手机选择已导出的完整集群备份 JSON 文件（选择后自动填入并解析）</span>
+            <input type="file" id="restore-file-input" accept=".zip,.json,application/zip,application/json" class="hidden">
+            <b style="display:block;font-size:14.5px;margin-bottom:4px">📦 点击选择 <code>nexusgate-master-backup.zip</code> 或 <code>.json</code> 备份文件</b>
+            <span class="muted" style="font-size:12px" id="restore-file-label">推荐上传 .zip 全量主控灾备包（内含 SSL 证书文件与完整集群状态，无需手动复制粘贴）</span>
+          </label>
+
+          <label class="wide" style="flex-direction:row;align-items:center;gap:8px;padding:10px 12px;border-radius:9px;background:var(--surface-soft);border:1px solid var(--line)">
+            <input type="checkbox" name="restorePanelSettings" id="restore-panel-settings-chk" style="width:16px;min-height:16px" checked>
+            <span><b>同步恢复原主控的面板端口、安全根路径、管理员账密与 SSL 证书</b>（异机迁入新主控时勾选，恢复后新主控的访问端口与安全路径将变回与原主控完全一致！）</span>
           </label>
 
           <label class="wide">
-            或直接粘贴备份 JSON 文本内容 (可选备用)
-            <textarea name="backupJson" id="restore-json-textarea" style="min-height:120px" placeholder='选择上方文件自动填充，或在此直接粘贴导出的 JSON 备份内容'></textarea>
+            或直接粘贴备份 JSON 文本内容 (仅当未选择上方文件时使用)
+            <textarea name="backupJson" id="restore-json-textarea" style="min-height:95px" placeholder='若已选择上方 .zip 或 .json 文件则无需填写此处'></textarea>
           </label>
 
           <div class="form-actions">
             <button type="button" data-close>取消</button>
-            <button type="submit" class="primary" id="restore-submit-btn">立即恢复全集群配置</button>
+            <button type="submit" class="primary" id="restore-submit-btn">立即恢复全集群与主控配置</button>
           </div>
         </form>
       `);
@@ -4651,10 +4658,19 @@ document.addEventListener('click', async (e) => {
           const file = fInput.files?.[0];
           if (!file) return;
           try {
-            const txt = await file.text();
-            if (tArea) tArea.value = txt;
-            if (lbl) lbl.textContent = `✓ 已读取文件: ${file.name} (${fmtBytes(file.size)})`;
-            toast(`已读取备份文件 [${file.name}]，点击【立即恢复全集群配置】即可生效`);
+            if (file.name.toLowerCase().endsWith('.zip')) {
+              const ab = await file.arrayBuffer();
+              state._pendingRestoreZipBuf = ab;
+              if (tArea) tArea.value = '';
+              if (lbl) lbl.textContent = `✓ 已就绪 ZIP 全量灾备包: ${file.name} (${fmtBytes(file.size)} · 含证书与全集群数据)`;
+              toast(`已加载全量灾备包 [${file.name}]，点击【立即恢复全集群与主控配置】即可生效`);
+            } else {
+              state._pendingRestoreZipBuf = null;
+              const txt = await file.text();
+              if (tArea) tArea.value = txt;
+              if (lbl) lbl.textContent = `✓ 已读取 JSON 备份文件: ${file.name} (${fmtBytes(file.size)})`;
+              toast(`已读取备份文件 [${file.name}]，点击【立即恢复全集群与主控配置】即可生效`);
+            }
           } catch (err) {
             toast(`读取文件失败: ${err.message}`, true);
           }
@@ -4998,21 +5014,44 @@ document.addEventListener('submit', async (e) => {
       showLogin();
     }
     else if (form.id === 'restore-backup-form') {
-      const rawJson = (data.backupJson || '').trim();
-      if (!rawJson) {
-        throw new Error('请先选择备份文件或粘贴备份 JSON 内容');
+      const restorePanelSettings = Boolean(form.querySelector('#restore-panel-settings-chk')?.checked);
+      let res;
+      if (state._pendingRestoreZipBuf) {
+        toast('正在解压并恢复 .zip 全量主控灾备包（含证书、端口路径与全集群节点）...');
+        res = await api(`/api/restore?restorePanelSettings=${restorePanelSettings}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/zip' },
+          body: state._pendingRestoreZipBuf
+        });
+        state._pendingRestoreZipBuf = null;
+      } else {
+        const rawJson = (data.backupJson || '').trim();
+        if (!rawJson) {
+          throw new Error('请先点击上方选择 .zip / .json 备份文件，或粘贴备份内容');
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(rawJson);
+        } catch {
+          throw new Error('备份文件格式有误，请选择有效的 .zip 或 .json 备份文件');
+        }
+        toast('正在恢复全集群配置与节点数据...');
+        res = await api('/api/restore', {
+          method: 'POST',
+          body: JSON.stringify({ backup: parsed, restorePanelSettings })
+        });
       }
-      let parsed;
-      try {
-        parsed = JSON.parse(rawJson);
-      } catch (err) {
-        throw new Error('备份文件格式有误，无法解析为有效 JSON');
-      }
-      toast('正在恢复全集群配置与节点数据...');
-      const res = await api('/api/restore', { method: 'POST', body: JSON.stringify({ backup: parsed }) });
       closeModal();
-      toast(`🎉 全集群备份已成功恢复！共恢复 ${res.nodesCount || 0} 台服务器、${res.inboundsCount || 0} 个入站节点与 ${res.outboundsCount || 0} 个出站！`);
-      load('overview');
+      toast(`🎉 主控灾备恢复成功！端口:${res.restoredPort || state.settings?.webPort} 路径:${res.restoredBasePath || BASE_PATH} (${res.nodesCount || 0}台服务器 / ${res.inboundsCount || 0}个入站 / ${res.certificatesCount || 0}张证书)`);
+      const nextPort = Number(res.restoredPort || window.location.port || 2053);
+      const nextBase = (res.restoredBasePath || '/').replace(/\/+$/, '');
+      if (res.restarting && (String(nextPort) !== String(window.location.port) || nextBase !== BASE_PATH)) {
+        setTimeout(() => {
+          window.location.href = `${window.location.protocol}//${window.location.hostname}:${nextPort}${nextBase || ''}/`;
+        }, 700);
+      } else {
+        load('overview');
+      }
     }
   } catch (err) {
     if (form.id === 'login-form') $('#login-error').textContent = err.message;
