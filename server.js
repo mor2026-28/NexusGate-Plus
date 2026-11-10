@@ -1362,6 +1362,21 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { ok: true });
     }
 
+    const inbOutboundMatch = route('/api/inbounds/:id/outbound', pathname);
+    if (inbOutboundMatch && method === 'POST') {
+      const existing = store.state.inbounds.find((x) => x.id === inbOutboundMatch.id);
+      if (!existing) return sendError(res, 404, '未找到该入站节点');
+      const body = await readJson(req);
+      const nextOut = String(body.outboundTag || 'default').trim();
+      store.transact((st) => {
+        existing.outboundTag = nextOut;
+        syncInboundRelayToRoutingRule(st, existing);
+        store.addAudit(session.username, 'bind_inbound_outbound', `${existing.remark} ➔ ${nextOut}`);
+      });
+      autoApplyIfEnabled();
+      return sendJson(res, 200, { inbound: enrichInboundWithLinks(existing, reqHostHeader), routing: store.state.routing });
+    }
+
     const inbToggle = route('/api/inbounds/:id/toggle', pathname);
     if (inbToggle && method === 'POST') {
       const existing = store.state.inbounds.find((x) => x.id === inbToggle.id);
@@ -2217,6 +2232,15 @@ async function handleRequest(req, res) {
     if (clusterNodeConfig && method === 'GET') {
       const compiled = compileNodeSingboxConfig(store.state, clusterNodeConfig.id);
       return sendJson(res, 200, compiled);
+    }
+
+    if (pathname === '/api/cluster/sync-all' && method === 'POST') {
+      ensureClusterNodes(store.state);
+      const results = await Promise.all(
+        (store.state.nodes || []).map((n) => pushConfigToAgentNode(store.state, n.id))
+      );
+      store.save();
+      return sendJson(res, 200, { ok: true, count: results.length, results });
     }
 
     const clusterNodeSync = route('/api/cluster/nodes/:id/sync', pathname);

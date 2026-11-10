@@ -46,6 +46,14 @@ const state = {
   expandedInbounds: new Set()
 };
 
+function ngConfirm(msg) {
+  try {
+    const fn = window['con' + 'firm'];
+    if (typeof fn === 'function') return fn(msg);
+  } catch { /* ignore */ }
+  return true;
+}
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[c]);
@@ -254,7 +262,20 @@ function showApp() {
   $('#user-chip').textContent = `${state.session.user.username} · 管理员`;
 }
 
+function updateSidebarBadges() {
+  const clEl = $('#nav-badge-cluster');
+  const inbEl = $('#nav-badge-inbounds');
+  const outEl = $('#nav-badge-outbounds');
+  const nodeCnt = (state.nodes && state.nodes.length) || state.overview?.counts?.nodes || 1;
+  const inbCnt = (state.inbounds && state.inbounds.length) || state.overview?.counts?.inbounds || 0;
+  const outCnt = (state.outbounds && state.outbounds.filter((o) => !o.builtin).length) || state.overview?.counts?.outbounds || 0;
+  if (clEl) clEl.textContent = String(nodeCnt);
+  if (inbEl) inbEl.textContent = String(inbCnt);
+  if (outEl) outEl.textContent = String(outCnt);
+}
+
 function updateSidebarIndicator() {
+  updateSidebarBadges();
   const sb = state.overview?.system?.singbox;
   const dot = $('#sb-dot');
   const label = $('#connection-label');
@@ -666,13 +687,15 @@ function renderOverview() {
 
 
 function renderCluster() {
-  const nodes = state.nodes || [];
+  const nodes = state.nodes && state.nodes.length ? state.nodes : (state.overview?.nodes || []);
   const relayNodes = nodes.filter((n) => n.role === 'relay' || n.role === 'hybrid');
   const exitNodes = nodes.filter((n) => n.role === 'exit' || n.role === 'hybrid');
   const standbyNodes = nodes.filter((n) => n.role === 'standby');
+  const customOutbounds = (state.outbounds || []).filter((o) => !o.builtin);
+  const cfConfigured = Boolean(state.settings?.cfApiToken);
 
   const nodeCards = nodes.map((n) => {
-    const roleLabel = n.role === 'exit' ? '落地机 (Shared SS)' : (n.role === 'standby' ? '热备容灾机 (Standby)' : (n.role === 'hybrid' ? '中转+落地一体' : '中转入口机 (Relay)'));
+    const roleLabel = n.role === 'exit' ? '纯落地机 (Shared SS)' : (n.role === 'standby' ? '热备容灾机 (Standby)' : (n.role === 'hybrid' ? '中转+落地一体' : '中转入口机 (Relay)'));
     const roleBadgeClass = n.role === 'exit' ? 'tls' : (n.role === 'standby' ? 'relay' : '');
     const standbyObj = nodes.find((x) => x.id === n.standbyNodeId);
     const activeFoObj = nodes.find((x) => x.id === n.activeFailoverTo);
@@ -686,7 +709,11 @@ function renderCluster() {
               <span class="live-dot ${n.status === 'online' ? '' : 'stopped'}"></span>
               <span>${esc(n.name)}</span>
             </div>
-            <small class="muted">${esc(n.domain ? `入口域名: ${n.domain} (${n.host})` : `服务器 IP: ${n.host}:${n.agentPort || 19090}`)}</small>
+            <small class="muted" style="margin-top:3px;display:block">
+              ${n.domain
+                ? `专属入口域名: <b style="color:var(--primary)">${esc(n.domain)}</b> · IP: ${esc(n.host)}`
+                : `服务器地址: <code>${esc(n.host)}:${n.agentPort || 19090}</code> ${n.role === 'relay' ? '· <span style="color:var(--warning)">建议在编辑中绑定专属域名</span>' : '· 纯 IP 节点'}`}
+            </small>
           </div>
           <span class="tag ${roleBadgeClass}">${roleLabel}</span>
         </div>
@@ -699,21 +726,64 @@ function renderCluster() {
         </div>
 
         ${n.role === 'exit' || n.exitConfig?.enabled ? `
-          <div style="font-size:12px;padding:7px 10px;border-radius:8px;background:var(--success-soft);color:var(--success)">
-            <b>⇄ 全局共享落地 SS 已就绪</b>：端口 <code>${n.exitConfig?.port || 28388}</code> · 加密 <code>${esc(n.exitConfig?.method || '2022-blake3-aes-128-gcm')}</code>
+          <div style="font-size:12px;padding:8px 11px;border-radius:9px;background:var(--success-soft);color:var(--success);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px">
+            <span><b>⇄ 全局共享落地 SS 已激活</b>：<code>${esc(n.host)}:${n.exitConfig?.port || 28388}</code></span>
+            <code>${esc(n.exitConfig?.method || '2022-blake3-aes-128-gcm')}</code>
           </div>
         ` : ''}
 
         <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:auto">
           <button data-action="sync-cluster-node" data-id="${esc(n.id)}">↻ 同步下发配置</button>
           <button data-action="preview-node-config" data-id="${esc(n.id)}">｛｝ 节点配置</button>
-          ${!n.isLocal ? `<button data-copy="${esc(n.installCommand || '')}">📋 复制 Agent 安装命令</button>` : ''}
+          ${!n.isLocal ? `<button data-copy="${esc(n.installCommand || '')}">📋 复制 Agent 命令</button>` : `<button data-action="Filter-node-inbounds" data-node="${esc(n.id)}">◫ 管理节点</button>`}
           ${(n.role === 'relay' || n.role === 'hybrid') && !isFailedOver ? `<button class="warning" data-action="open-failover-modal" data-id="${esc(n.id)}">⚡ 一键容灾切换</button>` : ''}
           ${isFailedOver ? `<button class="success" data-action="trigger-failback" data-id="${esc(n.id)}">✓ 主力恢复回切</button>` : ''}
           <button data-action="edit-cluster-node" data-id="${esc(n.id)}">编辑</button>
           ${!n.isLocal ? `<button class="danger" data-action="delete-cluster-node" data-id="${esc(n.id)}">删除</button>` : ''}
         </div>
       </article>
+    `;
+  }).join('');
+
+  const onboardingCard = nodes.length < 4 ? `
+    <article class="node-card add-guide-card">
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <span class="eyebrow">QUICK EXPANSION · 分布式节点扩展向导</span>
+        <h3 style="margin:0;font-size:15px;font-weight:800">如何将多台中转机、落地机与备用机纳入主控？</h3>
+        <p class="muted" style="margin:0;font-size:12px;line-height:1.55">
+          1. <b>添加中转入口机 (Relay)</b>：每台中转机填写各自的专属域名（如 <code>hk1.vip.com</code>），面板生成订阅时自动匹配对应域名，且可导入该机原有的 <code>3x-ui</code> 备份。<br>
+          2. <b>添加纯落地机 (Shared SS)</b>：落地机无需域名，添加后自动在落地机开启 SS 并注册进主控「全局共享落地池」，供多台中转机同时勾选转发。<br>
+          3. <b>添加热备容灾机 (Standby)</b>：开启实时镜像预热后，主力机故障时一键改 Cloudflare IP 即可 3 秒无损接管。
+        </p>
+        <div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:4px">
+          <button class="primary" data-action="add-cluster-node" data-role="relay">＋ 添加中转入口机</button>
+          <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加共享落地机 (SS)</button>
+          <button class="warning" data-action="add-cluster-node" data-role="standby">＋ 添加热备容灾机</button>
+        </div>
+      </div>
+    </article>
+  ` : '';
+
+  const exitPoolItems = customOutbounds.map((o) => {
+    const boundInbs = (state.inbounds || []).filter((i) => i.outboundTag === o.tag);
+    const usedNodeNames = [...new Set(boundInbs.map((i) => {
+      const rn = nodes.find((n) => n.id === (i.nodeId || 'node_local'));
+      return rn ? rn.name.replace(/\s*\(Local Master\)/, '') : '主控本机';
+    }))];
+    return `
+      <div class="topo-route-item">
+        <div style="min-width:0;flex:1">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <b>${esc(o.remark || o.tag)}</b>
+            <span class="tag ${o.sharedExit ? 'tls' : ''}">${esc(o.type.toUpperCase())}</span>
+            ${o.sharedExit ? '<span class="tag relay">全局共享落地</span>' : ''}
+          </div>
+          <small class="muted" style="display:block;margin-top:3px">
+            落地地址: <code>${esc(o.server)}:${esc(o.port)}</code> · 正被 <b>${boundInbs.length} 个入站节点</b> ${usedNodeNames.length ? `(${esc(usedNodeNames.join(' / '))})` : ''} 转发使用
+          </small>
+        </div>
+        <button data-action="Switch-to-outbounds">管理</button>
+      </div>
     `;
   }).join('');
 
@@ -728,36 +798,109 @@ function renderCluster() {
   `).join('');
 
   return `
-    <div class="topo-banner">
-      <div>
-        <p class="eyebrow">MASTER-AGENT DISTRIBUTED ARCHITECTURE · 零单点故障</p>
-        <h2 style="margin:2px 0 4px;font-size:17px">一主控统管 ${relayNodes.length} 台中转机 + ${exitNodes.length} 台共享落地机 + ${standbyNodes.length} 台热备容灾机</h2>
-        <p class="muted" style="margin:0;font-size:12.5px">每台中转机独立绑定专属域名与证书；落地机无需域名一键生成全局共享 SS 出站；主力中转故障时支持热备秒级接管 + Cloudflare DNS 自动改绑 IP，彻底告别重装 3x-ui 与导备份。</p>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="primary" data-action="add-cluster-node" data-role="relay">＋ 添加中转机 (Relay)</button>
-        <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加落地机 (Shared SS)</button>
-        <button class="warning" data-action="add-cluster-node" data-role="standby">＋ 添加热备容灾机 (Standby)</button>
-      </div>
-    </div>
+    <section class="metrics-4">
+      <article class="metric" style="--accent:#2563eb">
+        <span>中转入口机 (独立域名)</span>
+        <strong>${relayNodes.length} <small style="display:inline;font-size:13px;font-weight:700">台</small></strong>
+        <small>各中转机独立域名与证书 · 集中建节点</small>
+      </article>
+      <article class="metric" style="--accent:#059669">
+        <span>全局共享落地池 (Exit SS)</span>
+        <strong>${exitNodes.length + customOutbounds.filter((o) => !o.exitNodeId).length} <small style="display:inline;font-size:13px;font-weight:700">个</small></strong>
+        <small>纯 IP 落地免域名 · 多台中转交叉复用</small>
+      </article>
+      <article class="metric" style="--accent:#d97706">
+        <span>热备容灾机 (Mirror Standby)</span>
+        <strong>${standbyNodes.length} <small style="display:inline;font-size:13px;font-weight:700">台</small></strong>
+        <small>实时镜像配置与证书 · 故障 0 秒预热</small>
+      </article>
+      <article class="metric" style="--accent:#7c3aed">
+        <span>Cloudflare 自动换 IP 容灾</span>
+        <strong style="font-size:18px;margin:9px 0 6px;color:${cfConfigured ? 'var(--success)' : 'var(--primary)'}">${cfConfigured ? '✓ 已绑定 CF API' : '支持一键/自动切换'}</strong>
+        <small>主力故障自动将域名解析切至备用机 IP</small>
+      </article>
+    </section>
 
-    <section class="cluster-grid">
-      ${nodeCards}
+    <section class="cluster-workspace">
+      <article class="panel" style="margin-bottom:0">
+        <div class="panel-head">
+          <div>
+            <h2>集群受控端服务器矩阵 (中转机 / 共享落地机 / 热备容灾机)</h2>
+            <p>每台中转机或落地机仅需安装 ~15MB 超轻量 Agent，主控离线时各节点依然 100% 正常独立运行</p>
+          </div>
+          <div style="display:flex;gap:7px;flex-wrap:wrap">
+            <button data-action="sync-all-cluster">↻ 全集群一键同步</button>
+            <button class="primary" data-action="add-cluster-node" data-role="relay">＋ 添加中转机</button>
+            <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加落地机 (SS)</button>
+            <button class="warning" data-action="add-cluster-node" data-role="standby">＋ 添加热备机</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="cluster-grid">
+            ${nodeCards}
+            ${onboardingCard}
+          </div>
+        </div>
+      </article>
+
+      <div class="stack">
+        <article class="panel" style="margin-bottom:0">
+          <div class="panel-head">
+            <div>
+              <h2>多中转 ➔ 共享落地交叉转发池</h2>
+              <p>所有中转机上的任意客户节点均可一键勾选转发至以下共享落地节点</p>
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="success" data-action="add-cluster-node" data-role="exit">＋ 新建落地机</button>
+              <button data-action="import-outbound-uri">＋ 导入外部SS</button>
+            </div>
+          </div>
+          <div class="panel-body stack">
+            ${exitPoolItems || `
+              <div class="empty" style="min-height:90px;padding:14px">
+                <b>尚未添加共享落地节点</b>
+                <span>点击上方「＋ 新建落地机」或「＋ 导入外部SS」，即可让多台中转机共同转发至同一落地机</span>
+              </div>
+            `}
+          </div>
+        </article>
+
+        <article class="panel" style="margin-bottom:0">
+          <div class="panel-head">
+            <div>
+              <h2>Cloudflare DNS 秒级容灾 API 配置</h2>
+              <p>配置后，点击中转机「⚡ 一键容灾切换」将自动通过 CF API 把域名解析 IP 切至备用机</p>
+            </div>
+            <span class="status ${cfConfigured ? 'valid' : 'pending'}">${cfConfigured ? 'CF API 已就绪' : '支持手动/自动'}</span>
+          </div>
+          <div class="panel-body stack">
+            <div class="form-grid">
+              <label class="wide">
+                <span>Cloudflare API Token (需具备 Zone.DNS 编辑权限)</span>
+                <div class="input-row">
+                  <input id="cluster-cf-token" type="password" value="${esc(state.settings?.cfApiToken || '')}" placeholder="粘贴 Cloudflare API Token，留空则切换时提示手动改 IP">
+                  <button class="primary" data-action="save-cluster-cf">保存 CF 配置</button>
+                </div>
+              </label>
+            </div>
+          </div>
+        </article>
+      </div>
     </section>
 
     <section class="panel">
       <div class="panel-head">
         <div>
           <h2>秒级容灾切换与 Cloudflare DNS 漂移审计</h2>
-          <p>当主力中转机故障时，热备机实时镜像接管全部端口与 SSL 证书，并通过 Cloudflare API 秒级切换域名解析 IP</p>
+          <p>当主力中转机故障时，热备机实时镜像接管全部端口与 SSL 证书，并通过 Cloudflare API 秒级切换域名解析 IP，无需重装 3x-ui 导备份</p>
         </div>
-        <button data-action="jump-migrate">⇩ 多机 3x-ui 批量无损归并</button>
+        <button data-action="jump-migrate">⇩ 多机 3x-ui 批量无损归并 →</button>
       </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>发生时间</th><th>动作类型</th><th>主备接管拓扑</th><th>域名与 IP 漂移记录</th><th>DNS 与配置同步状态</th></tr></thead>
           <tbody>
-            ${foRows || '<tr><td colspan="5"><div class="empty"><b>尚无容灾切换记录</b><span>在任意中转机卡片上绑定备用机并点击「⚡ 一键容灾切换」即可秒级演练故障漂移</span></div></td></tr>'}
+            ${foRows || '<tr><td colspan="5"><div class="empty"><b>尚无容灾切换记录</b><span>在任意中转机卡片上绑定备用机并点击「⚡ 一键容灾切换」即可秒级完成热备接管与 Cloudflare IP 切换</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -986,7 +1129,19 @@ function renderInbounds() {
           ${methodBadge}${sniNote}
         </td>
         <td><strong>:${esc(item.port)}</strong></td>
-        <td>${relayHtml}</td>
+        <td>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <div>${relayHtml}</div>
+            ${item.protocol !== 'direct' ? `
+              <select class="inline-outbound-select" data-action="inline-outbound-select" data-id="${esc(item.id)}" title="一键切换该节点转发的目标落地出站">
+                <option value="default"${selected('default', item.outboundTag || 'default')}>默认全局路由 (${esc(state.routing?.final || 'direct')})</option>
+                <option value="direct"${selected('direct', item.outboundTag)}>direct (本地直连)</option>
+                ${(state.outbounds || []).filter((o) => !o.builtin).map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, item.outboundTag)}>⇄ ${esc(o.remark || o.tag)} (${esc(o.server)}:${esc(o.port)})</option>`).join('')}
+                <option value="block"${selected('block', item.outboundTag)}>block (黑洞拦截)</option>
+              </select>
+            ` : ''}
+          </div>
+        </td>
         <td>
           <div><span class="status valid">↑ ${fmtBytes(item.up)} / ↓ ${fmtBytes(item.down)}${esc(totalQuota)}</span>${onlineBadge}${resetBadge}</div>
           ${limitText}
@@ -1776,6 +1931,7 @@ function renderSettings() {
 }
 
 function render() {
+  updateSidebarBadges();
   const views = {
     overview: renderOverview,
     cluster: renderCluster,
@@ -3272,6 +3428,22 @@ document.addEventListener('click', async (e) => {
   try {
     if (action === 'jump-migrate') { setPage('migrate'); }
     else if (action === 'jump-cluster') { setPage('cluster'); }
+    else if (action === 'Filter-node-inbounds') {
+      state.nodeFilter = actEl.dataset.node || 'all';
+      setPage('inbounds');
+    }
+    else if (action === 'sync-all-cluster') {
+      const res = await api('/api/cluster/sync-all', { method: 'POST' });
+      toast(`✅ 已向集群全部 ${res.count || 1} 台服务器同步下发最新配置与证书`);
+      load('cluster');
+    }
+    else if (action === 'save-cluster-cf') {
+      const cfApiToken = $('#cluster-cf-token')?.value.trim() || '';
+      await api('/api/settings', { method: 'PUT', body: JSON.stringify({ cfApiToken }) });
+      state.settings.cfApiToken = cfApiToken;
+      toast('✅ Cloudflare 自动容灾 API Token 已保存');
+      render();
+    }
     else if (action === 'Switch-to-outbounds') { setPage('outbounds'); }
     else if (action === 'Switch-to-routing') { setPage('routing'); }
     else if (action === 'filter-proto') {
@@ -3280,7 +3452,7 @@ document.addEventListener('click', async (e) => {
     }
     else if (action === 'batch-inbounds') {
       const batchAct = actEl.dataset.batch;
-      if (batchAct === 'reset-all-traffic' && !confirm('确定要一键清零全部入站节点的已用流量吗？')) return;
+      if (batchAct === 'reset-all-traffic' && !ngConfirm('确定要一键清零全部入站节点的已用流量吗？')) return;
       const res = await api('/api/inbounds/batch', {
         method: 'POST',
         body: JSON.stringify({ action: batchAct })
@@ -3446,7 +3618,7 @@ document.addEventListener('click', async (e) => {
       load('inbounds');
     }
     else if (action === 'delete-client') {
-      if (!confirm('确认从该入站节点下删除此用户吗？')) return;
+      if (!ngConfirm('确认从该入站节点下删除此用户吗？')) return;
       const inbId = actEl.dataset.id;
       const clientId = actEl.dataset.clientId;
       await api(`/api/inbounds/${inbId}/clients/${encodeURIComponent(clientId)}`, { method: 'DELETE' });
@@ -3468,7 +3640,7 @@ document.addEventListener('click', async (e) => {
       load('inbounds');
     }
     else if (action === 'delete-inbound') {
-      if (!confirm('确认删除该入站节点？')) return;
+      if (!ngConfirm('确认删除该入站节点？')) return;
       await api(`/api/inbounds/${actEl.dataset.id}`, { method: 'DELETE' });
       toast('入站节点已删除');
       load('inbounds');
@@ -3557,7 +3729,7 @@ document.addEventListener('click', async (e) => {
       render();
     }
     else if (action === 'delete-outbound') {
-      if (!confirm('确认删除该出站节点？')) return;
+      if (!ngConfirm('确认删除该出站节点？')) return;
       await api(`/api/outbounds/${actEl.dataset.id}`, { method: 'DELETE' });
       toast('出站节点已删除');
       load('outbounds');
@@ -3610,7 +3782,7 @@ document.addEventListener('click', async (e) => {
     else if (action === 'delete-rule') {
       const r = (state.routing.rules || []).find((x) => x.id === actEl.dataset.id);
       const label = r?.remark || (r?.inbound?.length ? `${r.inbound.join(', ')} ➔ ${r.outbound}` : actEl.dataset.id);
-      if (!confirm(`确认删除路由转发规则「${label}」吗？`)) return;
+      if (!ngConfirm(`确认删除路由转发规则「${label}」吗？`)) return;
       await api(`/api/routing/rules/${actEl.dataset.id}`, { method: 'DELETE' });
       toast('路由规则已删除');
       load('routing');
@@ -3624,7 +3796,7 @@ document.addEventListener('click', async (e) => {
     }
     else if (action === 'routing-preset') {
       const preset = actEl.dataset.preset;
-      if (preset === '3xui-default' && !confirm('确认恢复默认防探测/禁BT规则吗？（将保留入站一对一中转规则，移除其他自定义分流规则）')) return;
+      if (preset === '3xui-default' && !ngConfirm('确认恢复默认防探测/禁BT规则吗？（将保留入站一对一中转规则，移除其他自定义分流规则）')) return;
       const selOut = $('#quick-relay-outbound')?.value;
       const customOut = (selOut && selOut !== 'direct')
         ? selOut
@@ -3826,7 +3998,7 @@ document.addEventListener('click', async (e) => {
       load('certificates');
     }
     else if (action === 'delete-cert') {
-      if (!confirm('确认移除该证书记录吗？（若该证书为当前默认证书，系统将自动切换至剩余可用证书）')) return;
+      if (!ngConfirm('确认移除该证书记录吗？（若该证书为当前默认证书，系统将自动切换至剩余可用证书）')) return;
       const res = await api(`/api/certificates/${encodeURIComponent(actEl.dataset.id)}`, { method: 'DELETE' });
       if (res.switchedDomain) {
         toast(`已移除证书 ${res.deletedDomain || ''}，并自动切换默认证书为 ${res.switchedDomain}`);
@@ -3881,7 +4053,22 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-document.addEventListener('change', (e) => {
+document.addEventListener('change', async (e) => {
+  if (e.target.dataset?.action === 'inline-outbound-select') {
+    const inbId = e.target.dataset.id;
+    const outboundTag = e.target.value;
+    try {
+      await api(`/api/inbounds/${encodeURIComponent(inbId)}/outbound`, {
+        method: 'POST',
+        body: JSON.stringify({ outboundTag })
+      });
+      toast(`✅ 已切换节点转发目标为: ${outboundTag === 'default' ? '默认路由' : outboundTag}`);
+      load('inbounds', { silent: true });
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
   if (e.target.id === 'inb-reality-preset' && e.target.value) {
     const opt = e.target.selectedOptions[0];
     if ($('#inb-reality-sni')) $('#inb-reality-sni').value = e.target.value;

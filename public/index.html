@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta name="theme-color" content="#f4f7fc">
+  <meta name="theme-color" content="#f1f5f9">
   <title>NexusGate Plus · 枢门集群 (v1.0.0)</title>
   <link rel="stylesheet" href="/styles.css?v=1.0.0">
   <script>window.__NG_BASE_PATH__ = "/";</script>
@@ -12,7 +12,7 @@
 <body>
   <div id="login" class="login-shell hidden">
     <section class="login-main">
-      <button class="theme-button login-theme" type="button" data-theme-toggle aria-label="切换主题">☀ 浅色</button>
+      <button class="theme-button login-theme" type="button" data-theme-toggle aria-label="切换主题">☀ 明亮模式</button>
       <div class="login-card">
         <div class="brand login-brand">
           <span class="brand-mark">N+</span>
@@ -22,13 +22,13 @@
           </span>
         </div>
         <div class="login-copy">
-          <h1>欢迎登录主控台</h1>
+          <h1>欢迎登录集群主控</h1>
           <p class="muted" style="margin-top:6px;font-size:13px">一主控统管多域名中转、共享落地 SS 池、3x-ui 无损归并与秒级容灾</p>
         </div>
         <form id="login-form" class="stack login-form">
           <label>管理员账号<input name="username" autocomplete="username" placeholder="请输入管理员账号" required></label>
           <label>管理员密码<input name="password" type="password" autocomplete="current-password" placeholder="请输入登录密码" required></label>
-          <button class="primary full large" type="submit">进入集群主控台 →</button>
+          <button class="primary full large" type="submit">登录主控台 →</button>
         </form>
         <p id="login-error" class="form-error"></p>
       </div>
@@ -44,21 +44,68 @@
           <small>枢门集群主控 · v1.0.0</small>
         </span>
       </div>
-      <p class="nav-caption">全局监控与集群</p>
+
+      <p class="nav-caption">核心监控与集群</p>
       <nav id="nav">
-        <button data-page="overview" class="active"><span class="nav-icon">▦</span><span class="nav-label">系统与内核总览</span></button>
-        <button data-page="cluster"><span class="nav-icon">❖</span><span class="nav-label">中转与落地集群</span></button>
+        <button data-page="overview" class="active">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
+          </span>
+          <span class="nav-label">系统与内核总览</span>
+        </button>
+        <button data-page="cluster">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M10.5 7.5 6.5 16.5"/><path d="M13.5 7.5 17.5 16.5"/><path d="M8 19h8"/></svg>
+          </span>
+          <span class="nav-label">中转与落地集群</span>
+          <span class="nav-badge" id="nav-badge-cluster">1</span>
+        </button>
+
         <p class="nav-caption nav-group">节点与多机转发</p>
-        <button data-page="inbounds"><span class="nav-icon">◫</span><span class="nav-label">入站节点管理</span></button>
-        <button data-page="routing"><span class="nav-icon">◇</span><span class="nav-label">路由规则 (转发)</span></button>
-        <button data-page="outbounds"><span class="nav-icon">⇄</span><span class="nav-label">出站规则 (落地池)</span></button>
-        <p class="nav-caption nav-group">无损迁移与安全</p>
-        <button data-page="migrate"><span class="nav-icon">⇩</span><span class="nav-label">备份迁移 (3x-ui)</span></button>
-        <button data-page="certificates"><span class="nav-icon">◎</span><span class="nav-label">SSL 证书与订阅</span></button>
-        <button data-page="settings"><span class="nav-icon">⚙</span><span class="nav-label">面板设置与安全</span></button>
+        <button data-page="inbounds">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="6" rx="2"/><rect x="2" y="14" width="20" height="6" rx="2"/><circle cx="6" cy="7" r="1"/><circle cx="6" cy="17" r="1"/></svg>
+          </span>
+          <span class="nav-label">入站节点管理</span>
+          <span class="nav-badge" id="nav-badge-inbounds">0</span>
+        </button>
+        <button data-page="outbounds">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/></svg>
+          </span>
+          <span class="nav-label">出站规则 (中转)</span>
+          <span class="nav-badge" id="nav-badge-outbounds">0</span>
+        </button>
+        <button data-page="routing">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+          </span>
+          <span class="nav-label">路由规则 (转发)</span>
+        </button>
+
+        <p class="nav-caption nav-group">无损迁移与运维</p>
+        <button data-page="migrate">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </span>
+          <span class="nav-label">备份迁移</span>
+        </button>
+        <button data-page="certificates">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+          </span>
+          <span class="nav-label">SSL 证书与订阅</span>
+        </button>
+        <button data-page="settings">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </span>
+          <span class="nav-label">面板设置与安全</span>
+        </button>
       </nav>
+
       <div class="sidebar-foot">
-        <div><span class="live-dot" id="sb-dot"></span><span id="connection-label">Sing-box 就绪</span></div>
+        <div><span class="live-dot" id="sb-dot"></span><span id="connection-label">Sing-box 运行中</span></div>
         <button id="logout" class="icon-button" title="退出登录">↗</button>
       </div>
     </aside>
