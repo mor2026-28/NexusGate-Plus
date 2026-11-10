@@ -467,7 +467,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.1 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.2 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -733,10 +733,25 @@ function renderCluster() {
           <div><span>承载入站 / 客户数</span><b>${n.inboundsCount || 0} 节点 · ${n.clientsCount || 0} 客户</b></div>
           <div><span>CPU / 常驻内存</span><b>${n.metrics?.cpuPct ?? 1.5}% · ${n.metrics?.memUsedMB ?? 24} MB</b></div>
           <div><span>节点累计总流量</span><b>↑${fmtBytes(n.upTotal || 0)} / ↓${fmtBytes(n.downTotal || 0)}</b></div>
-          <div><span>秒级热备容灾状态</span><b>${activeFoObj ? `⚠ 已接管至 ${esc(activeFoObj.name)}` : (standbyObj ? `🛡 备机: ${esc(standbyObj.name)}${n.mirrorStandby ? ' (已预热)' : ''}` : '未绑定热备机')}</b></div>
+          <div>
+            <span>${n.role === 'exit' ? '落地机容错备份状态' : '自动容灾与同步策略'}</span>
+            <b>${
+              n.role === 'exit'
+                ? (activeFoObj
+                    ? `⚠ 已容错切至 ${esc(activeFoObj.name)}`
+                    : (nodes.find((x) => x.id === n.fallbackExitNodeId)
+                        ? `🛡 备落地: ${esc(nodes.find((x) => x.id === n.fallbackExitNodeId).name)} (${n.autoFailoverMinutes || 3}m自切)`
+                        : '单机落地 (可绑备用落地)'))
+                : (activeFoObj
+                    ? `⚠ 已接管至 ${esc(activeFoObj.name)}`
+                    : (standbyObj
+                        ? `🛡 ${esc(standbyObj.name)} · ${n.autoFailover !== false ? `${n.autoFailoverMinutes || 3}m自切` : '手动'} (${n.standbySyncMode === 'daily' ? '每日备份' : (n.standbySyncMode === 'on_failover' ? '按需下发' : '变更同步·0流量')})`
+                        : '未绑定热备机'))
+            }</b>
+          </div>
         </div>
 
-        ${n.role === 'exit' || n.exitConfig?.enabled ? `
+        ${(n.role === 'exit' || n.role === 'hybrid') && n.exitConfig?.enabled !== false ? `
           <div style="font-size:12px;padding:8px 11px;border-radius:9px;background:var(--success-soft);color:var(--success);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px">
             <span><b>⇄ 全局共享落地 SS 已激活</b>：<code>${esc(n.host)}:${n.exitConfig?.port || 28388}</code></span>
             <code>${esc(n.exitConfig?.method || '2022-blake3-aes-128-gcm')}</code>
@@ -802,7 +817,7 @@ function renderCluster() {
   const foRows = (state.failoverLogs || []).map((log) => `
     <tr>
       <td><strong>${fmtDateTime(log.at)}</strong></td>
-      <td><span class="tag ${log.action === 'failover' ? 'relay' : 'tls'}">${log.action === 'failover' ? '⚡ 故障漂移接管' : '✓ 恢复回切'}</span></td>
+      <td><span class="tag ${log.action.includes('failover') ? 'relay' : 'tls'}">${log.action === 'exit_failover' ? '⚡ 落地容错切换' : (log.action === 'exit_failback' ? '✓ 落地恢复回切' : (log.action === 'failover' ? '⚡ 中转容灾接管' : '✓ 中转恢复回切'))}</span></td>
       <td><b>${esc(log.primaryNodeName)}</b> ➔ <b>${esc(log.standbyNodeName || '主力本机')}</b></td>
       <td><code>${esc(log.domain)}</code>: <code>${esc(log.oldIp)}</code> ➔ <code>${esc(log.newIp)}</code></td>
       <td><small>${esc(log.dnsMessage || log.reason || '')}</small></td>
@@ -841,6 +856,7 @@ function renderCluster() {
             <p>每台中转机或落地机仅需安装 ~15MB 超轻量 Agent，主控离线时各节点依然 100% 正常独立运行</p>
           </div>
           <div style="display:flex;gap:7px;flex-wrap:wrap">
+            <button data-action="run-cluster-health-check" title="立即执行一次全集群中转与落地存活探测及自动容灾检查">🛡 立即巡检容灾状态</button>
             <button data-action="sync-all-cluster">↻ 全集群一键同步</button>
             <button class="primary" data-action="add-cluster-node" data-role="relay">＋ 添加中转机</button>
             <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加落地机 (共享 SS)</button>
@@ -2903,8 +2919,29 @@ async function openInboundModal(existing = null, preset = '') {
     $('#inb-trans-select')?.addEventListener('change', renderSecAndTrans);
   };
 
-  renderDynamicFields();
-  $('#inb-proto-select')?.addEventListener('change', renderDynamicFields);
+  const syncInboundNodeDomain = () => {
+    const nodeSel = $('#inb-node-select');
+    if (!nodeSel) return;
+    const opt = nodeSel.options ? nodeSel.options[nodeSel.selectedIndex] : null;
+    const nodeDom = opt?.dataset?.domain || '';
+    if (nodeDom) {
+      item.tlsDomain = nodeDom;
+      const domInput = $('#inb-tls-domain');
+      if (domInput) domInput.value = nodeDom;
+      const matchedCert = (state.certificates || []).find((c) => c.domain === nodeDom);
+      if (matchedCert) {
+        item.certPath = matchedCert.certPath;
+        item.keyPath = matchedCert.keyPath;
+        if ($('#inb-cert-path')) $('#inb-cert-path').value = matchedCert.certPath;
+        if ($('#inb-key-path')) $('#inb-key-path').value = matchedCert.keyPath;
+        if ($('#inb-cert-select')) $('#inb-cert-select').value = matchedCert.domain;
+      }
+    }
+  };
+
+  renderDynamicFields().then(() => { if (!existing) syncInboundNodeDomain(); });
+  $('#inb-proto-select')?.addEventListener('change', () => renderDynamicFields().then(() => { if (!existing) syncInboundNodeDomain(); }));
+  $('#inb-node-select')?.addEventListener('change', syncInboundNodeDomain);
 }
 
 /**
@@ -3476,7 +3513,7 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
       </div>
 
       <div id="cluster-exit-ss-wrap" class="form-grid wide" style="margin:0;${showExitSection ? '' : 'display:none'}">
-        <div class="section-title">落地机自动开启共享 SS 配置 (仅当角色为「纯落地机」或「一体机」时生效，供多台中转机同时勾选转发)</div>
+        <div class="section-title">落地机自动开启共享 SS 与落地容错配置 (仅当角色为「纯落地机」或「一体机」时生效)</div>
         <label>
           落地 Shadowsocks 监听端口
           <input name="exitPort" type="number" value="${esc(n.exitConfig?.port || 28388)}" placeholder="28388" autocomplete="off">
@@ -3491,19 +3528,45 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
             <option value="chacha20-ietf-poly1305"${selected('chacha20-ietf-poly1305', n.exitConfig?.method)}>chacha20-ietf-poly1305</option>
           </select>
         </label>
-        <label class="wide">
-          落地 Shadowsocks 密码 (选填，留空将自动生成高强度密钥并同步给所有中转机；此外也可在《入站节点管理》为该落地机搭建额外节点)
+        <label>
+          落地 Shadowsocks 密码 (选填，留空自动生成高强度密钥)
           <input name="exitPassword" value="${esc(n.exitConfig?.password || '')}" placeholder="留空自动生成标准高强度 SS 密钥" autocomplete="off">
+        </label>
+        <label>
+          绑定备用容错落地机 (当本落地机故障时，自动将所有中转流量无缝切至备用落地机)
+          <select name="fallbackExitNodeId">
+            <option value="">暂不绑定备用落地机 (当集群 ≥2 台落地机时会自动生成高可用池 exit-ha-pool)</option>
+            ${(state.nodes || []).filter((x) => x.id !== n.id && (x.role === 'exit' || x.role === 'hybrid')).map((x) => `<option value="${esc(x.id)}"${selected(x.id, n.fallbackExitNodeId)}>【备用落地】${esc(x.name)} (${esc(x.host)}:${x.exitConfig?.port || 28388})</option>`).join('')}
+          </select>
         </label>
       </div>
 
       <div id="cluster-failover-cf-wrap" class="form-grid wide" style="margin:0;${showRelaySection ? '' : 'display:none'}">
-        <div class="section-title">秒级容灾热备与 Cloudflare DNS 自动换 IP (支持多个不同 CF 账号与多域名自动识别)</div>
+        <div class="section-title">断线自动容灾守护、省流热备同步与 Cloudflare DNS 自动换 IP</div>
         <label>
           绑定备用容灾机 (Standby Node)
           <select name="standbyNodeId">
             <option value="">暂不绑定备用机 (请先添加一台角色为「热备容灾机」的节点)</option>
             ${standbyChoices}
+          </select>
+        </label>
+        <label>
+          热备机数据同步策略 (解决流量消耗与同步时机)
+          <select name="standbySyncMode">
+            <option value="on_change"${selected('on_change', n.standbySyncMode || (n.mirrorStandby === false ? 'on_failover' : 'on_change'))}>⚡ 变更触发同步 (强烈推荐 · 仅在新增/改节点时同步一次，平时 0 流量，故障 0 秒接管)</option>
+            <option value="daily"${selected('daily', n.standbySyncMode)}>🕒 每日定时自动备份 (每天自动同步一次到备用机，故障切换瞬间自动补齐)</option>
+            <option value="on_failover"${selected('on_failover', n.standbySyncMode)}>🛡 仅故障切换时按需下发 (平时不预热备用机，触发容灾瞬间再下发配置与证书)</option>
+          </select>
+        </label>
+        <label>
+          断线多久自动触发容灾切换 (双重主动探测防误报)
+          <select name="autoFailoverMinutes">
+            <option value="1"${selected('1', String(n.autoFailoverMinutes || 3))}>连续断线 1 分钟自动切换备用机 (极速敏感)</option>
+            <option value="2"${selected('2', String(n.autoFailoverMinutes || 3))}>连续断线 2 分钟自动切换备用机</option>
+            <option value="3"${selected('3', String(n.autoFailoverMinutes || 3))}>连续断线 3 分钟自动切换备用机 (默认推荐 · 防网络抖动误判)</option>
+            <option value="5"${selected('5', String(n.autoFailoverMinutes || 3))}>连续断线 5 分钟自动切换备用机</option>
+            <option value="10"${selected('10', String(n.autoFailoverMinutes || 3))}>连续断线 10 分钟自动切换备用机</option>
+            <option value="15"${selected('15', String(n.autoFailoverMinutes || 3))}>连续断线 15 分钟自动切换备用机</option>
           </select>
         </label>
         <label>
@@ -3515,8 +3578,12 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
           <input name="cfZoneId" type="text" autocomplete="off" spellcheck="false" value="${esc(safeZoneId)}" placeholder="留空即可全自动按域名识别 Zone ID (无需填)">
         </label>
         <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
-          <input type="checkbox" name="mirrorStandby" style="width:16px;min-height:16px" ${n.mirrorStandby !== false ? 'checked' : ''}>
-          <span><b>开启实时热备镜像预热 (Mirror Standby)</b>：平时将本中转机的全部节点与 SSL 证书实时同步到备用机预热，主力机故障时仅需切换 Cloudflare IP 即可 0 秒接管！</span>
+          <input type="checkbox" name="autoFailover" style="width:16px;min-height:16px" ${n.autoFailover !== false ? 'checked' : ''}>
+          <span><b>开启断线超时自动容灾切换 (Auto Failover)</b>：当主力中转机连续断线达到上方设定分钟数且主动探测确认宕机时，无需人工干预，自动由备用机接管并调用 Cloudflare API 切换解析 IP！</span>
+        </label>
+        <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
+          <input type="checkbox" name="autoFailback" style="width:16px;min-height:16px" ${n.autoFailback ? 'checked' : ''}>
+          <span><b>开启主力机恢复自动回切 (Auto Failback)</b>：当主力中转机恢复在线后，自动将流量与 Cloudflare DNS 解析切回主力机（不勾选则保持在备用机，由你确认稳定后手动点击回切）</span>
         </label>
       </div>
 
@@ -3866,6 +3933,16 @@ document.addEventListener('click', async (e) => {
     else if (action === 'Filter-node-inbounds') {
       state.nodeFilter = actEl.dataset.node || 'all';
       setPage('inbounds');
+    }
+    else if (action === 'run-cluster-health-check') {
+      toast('🛡 正在巡检全集群节点连通性与自动容灾状态...');
+      const res = await api('/api/cluster/health-check', { method: 'POST', body: JSON.stringify({}) });
+      if (res.actionsCount > 0) {
+        toast(`⚡ 自动容灾巡检完成：已自动执行 ${res.actionsCount} 项故障接管/回切动作！`);
+      } else {
+        toast('✅ 全集群巡检完成：所有中转机与落地机运行正常，无需触发容灾切换');
+      }
+      load('cluster');
     }
     else if (action === 'sync-all-cluster') {
       const res = await api('/api/cluster/sync-all', { method: 'POST' });
@@ -4742,10 +4819,16 @@ document.addEventListener('submit', async (e) => {
     else if (form.id === 'cluster-node-form') {
       const id = form.dataset.id;
       const isExitLike = data.role === 'exit' || data.role === 'hybrid';
+      const syncMode = data.standbySyncMode || 'on_change';
       const payload = {
         ...data,
         exitEnabled: isExitLike,
-        mirrorStandby: Boolean(form.querySelector('input[name="mirrorStandby"]')?.checked)
+        standbySyncMode: syncMode,
+        mirrorStandby: syncMode !== 'on_failover',
+        autoFailover: Boolean(form.querySelector('input[name="autoFailover"]')?.checked),
+        autoFailoverMinutes: Number(data.autoFailoverMinutes || 3),
+        autoFailback: Boolean(form.querySelector('input[name="autoFailback"]')?.checked),
+        fallbackExitNodeId: isExitLike ? (data.fallbackExitNodeId || '') : ''
       };
       if (!isExitLike) {
         delete payload.exitPort;

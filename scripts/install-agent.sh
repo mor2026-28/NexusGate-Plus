@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# NexusGate Plus · 受控端 Agent 一键接入脚本 v1.0.1 (支持中转机 / 落地机 / 热备容灾机 / 3x-ui 原地平滑接管)
+# NexusGate Plus · 受控端 Agent 一键接入脚本 v1.0.2 (支持中转机 / 落地机 / 热备容灾机 / 3x-ui 原地平滑接管)
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 MASTER_URL=""
@@ -28,7 +28,7 @@ done
   exit 1
 }
 
-echo -e "\033[0;36m[NexusGate-Plus Agent v1.0.1]\033[0m 正在部署超轻量受控端节点 (${NODE_ID})..."
+echo -e "\033[0;36m[NexusGate-Plus Agent v1.0.2]\033[0m 正在部署超轻量受控端节点 (${NODE_ID})..."
 
 mkdir -p /opt/nexusgate-agent /etc/nexusgate/sing-box /etc/nexusgate/certs
 
@@ -128,4 +128,4 @@ EOF
 systemctl daemon-reload
 systemctl enable --now nexusgate-singbox.service 2>/dev/null || true
 systemctl enable --now nexusgate-agent.service
-echo -e "\033[0;32m[成功]\033[0m NexusGate Plus Agent v1.0.1 (${NODE_ID}) 已启动并连接主控 (${MASTER_URL})！"
+echo -e "\033[0;32m[成功]\033[0m NexusGate Plus Agent v1.0.2 (${NODE_ID}) 已启动并连接主控 (${MASTER_URL})！"

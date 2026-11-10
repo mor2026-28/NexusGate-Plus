@@ -54,13 +54,20 @@ const {
   syncExitNodeOutbounds,
   compileNodeSingboxConfig,
   pushConfigToAgentNode,
+  syncChangedClusterNodes,
   handleAgentHeartbeat,
   buildAgentInstallCommand
 } = require('./lib/cluster');
-const { triggerNodeFailover, triggerNodeFailback, updateCloudflareDnsIp, verifyCloudflareDomainAccess } = require('./lib/failover');
+const {
+  triggerNodeFailover,
+  triggerNodeFailback,
+  updateCloudflareDnsIp,
+  verifyCloudflareDomainAccess,
+  checkClusterHealthAndAutoFailover
+} = require('./lib/failover');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -671,13 +678,19 @@ function normalizeInboundPayload(body, existing = null) {
 
   if (security === 'tls') {
     const realCert = getActiveRealCert(store.state);
-    const defDomain = realCert?.domain || store.state.settings.webDomain || store.state.settings.defaultTlsDomain || 'www.apple.com';
-    const defCert = realCert?.certPath || store.state.settings.defaultCertFile || store.state.settings.webCertFile || '';
-    const defKey = realCert?.keyPath || store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || '';
-    inbound.tlsDomain = String(body.tlsDomain || existing?.tlsDomain || defDomain).trim();
-    if (inbound.tlsDomain === 'www.bing.com') inbound.tlsDomain = defDomain;
-    inbound.certPath = String(body.certPath || existing?.certPath || defCert).trim();
-    inbound.keyPath = String(body.keyPath || existing?.keyPath || defKey).trim();
+    const targetNode = (store.state.nodes || []).find((n) => n.id === inbound.nodeId);
+    const masterDefDomain = realCert?.domain || store.state.settings.webDomain || store.state.settings.defaultTlsDomain || 'www.apple.com';
+    const defDomain = (targetNode && targetNode.domain) ? targetNode.domain : masterDefDomain;
+    const rawReqDomain = String(body.tlsDomain || existing?.tlsDomain || '').trim();
+    inbound.tlsDomain = (!rawReqDomain || rawReqDomain === 'www.bing.com' || (targetNode?.domain && !existing && rawReqDomain === masterDefDomain))
+      ? defDomain
+      : rawReqDomain;
+    const matchedDomainCert = (store.state.certificates || []).find((c) => c.domain === inbound.tlsDomain && c.valid !== false)
+      || (store.state.certificates || []).find((c) => c.domain === inbound.tlsDomain);
+    const defCert = matchedDomainCert?.certPath || realCert?.certPath || store.state.settings.defaultCertFile || store.state.settings.webCertFile || '';
+    const defKey = matchedDomainCert?.keyPath || realCert?.keyPath || store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || '';
+    inbound.certPath = String(body.certPath || (matchedDomainCert ? matchedDomainCert.certPath : '') || existing?.certPath || defCert).trim();
+    inbound.keyPath = String(body.keyPath || (matchedDomainCert ? matchedDomainCert.keyPath : '') || existing?.keyPath || defKey).trim();
     inbound.allowInsecure = Boolean(body.allowInsecure ?? existing?.allowInsecure ?? false);
     inbound.alpn = Array.isArray(body.alpn)
       ? body.alpn
@@ -905,8 +918,14 @@ function enrichInboundWithLinks(inbound, reqHost = '') {
   const cleanReqHost = String(reqHost || '').split(':')[0].replace(/^\[|\]$/g, '');
   const realCert = getActiveRealCert(store.state);
   const defaultHost = store.state.settings.webDomain || realCert?.domain || store.state.settings.publicIPv4 || cleanReqHost || '127.0.0.1';
-  const activeIps = singbox.getActiveIpsForInbound(inbound.tag);
-  const activeDeviceCount = singbox.getActiveDeviceCountForInbound(inbound.tag);
+  const localIps = singbox.getActiveIpsForInbound(inbound.tag);
+  const remoteIps = Array.isArray(inbound.remoteActiveIps) ? inbound.remoteActiveIps : [];
+  const activeIps = [...new Set([...localIps, ...remoteIps])];
+  const activeDeviceCount = Math.max(
+    singbox.getActiveDeviceCountForInbound(inbound.tag),
+    Number(inbound.remoteActiveDevices || 0),
+    activeIps.length
+  );
   const isSingleClient = (inbound.clients?.length || 0) <= 1;
   const nowMs = Date.now();
   if (activeDeviceCount > 0) {
@@ -991,6 +1010,7 @@ function autoApplyIfEnabled(portsToOpen = []) {
           }
         }
       } catch { /* ignore */ }
+      syncChangedClusterNodes(store.state).catch(() => {});
     }
   });
 }
@@ -2156,7 +2176,12 @@ async function handleRequest(req, res) {
           region: String(body.region || (role === 'exit' ? 'Exit' : 'Relay')).trim(),
           isp: String(body.isp || '').trim(),
           standbyNodeId: String(body.standbyNodeId || '').trim(),
-          mirrorStandby: body.mirrorStandby !== false,
+          mirrorStandby: body.mirrorStandby !== false && body.standbySyncMode !== 'on_failover',
+          standbySyncMode: ['on_change', 'daily', 'on_failover'].includes(body.standbySyncMode) ? body.standbySyncMode : (body.mirrorStandby === false ? 'on_failover' : 'on_change'),
+          autoFailover: body.autoFailover !== false,
+          autoFailoverMinutes: Math.max(1, Math.min(60, Number(body.autoFailoverMinutes || 3))),
+          autoFailback: role === 'exit' ? body.autoFailback !== false : Boolean(body.autoFailback),
+          fallbackExitNodeId: String(body.fallbackExitNodeId || '').trim(),
           activeFailoverTo: '',
           failoverAt: '',
           cfApiToken: String(body.cfApiToken || '').trim(),
@@ -2221,7 +2246,19 @@ async function handleRequest(req, res) {
         if (body.region !== undefined) existing.region = String(body.region).trim();
         if (body.isp !== undefined) existing.isp = String(body.isp).trim();
         if (body.standbyNodeId !== undefined) existing.standbyNodeId = String(body.standbyNodeId).trim();
-        if (body.mirrorStandby !== undefined) existing.mirrorStandby = Boolean(body.mirrorStandby);
+        if (body.standbySyncMode !== undefined && ['on_change', 'daily', 'on_failover'].includes(body.standbySyncMode)) {
+          existing.standbySyncMode = body.standbySyncMode;
+          existing.mirrorStandby = body.standbySyncMode !== 'on_failover';
+        } else if (body.mirrorStandby !== undefined) {
+          existing.mirrorStandby = Boolean(body.mirrorStandby);
+          if (!existing.mirrorStandby) existing.standbySyncMode = 'on_failover';
+          else if (existing.standbySyncMode === 'on_failover') existing.standbySyncMode = 'on_change';
+        }
+        if (body.autoFailover !== undefined) existing.autoFailover = Boolean(body.autoFailover);
+        if (body.autoFailoverMinutes !== undefined) existing.autoFailoverMinutes = Math.max(1, Math.min(60, Number(body.autoFailoverMinutes || 3)));
+        if (body.autoFailback !== undefined) existing.autoFailback = Boolean(body.autoFailback);
+        if (body.fallbackExitNodeId !== undefined) existing.fallbackExitNodeId = String(body.fallbackExitNodeId).trim();
+        if (body.status !== undefined && ['online', 'offline'].includes(body.status)) existing.status = body.status;
         if (body.cfApiToken !== undefined) existing.cfApiToken = String(body.cfApiToken).trim();
         if (body.cfZoneId !== undefined) {
           const zRaw = String(body.cfZoneId || '').trim();
@@ -2341,6 +2378,15 @@ async function handleRequest(req, res) {
         'cluster_failback',
         `${result.event.primaryNodeName} 已恢复回切 (${result.event.domain} -> ${result.event.newIp})`
       ));
+      return sendJson(res, 200, result);
+    }
+
+    if (pathname === '/api/cluster/health-check' && method === 'POST') {
+      const body = await readJson(req);
+      const result = await checkClusterHealthAndAutoFailover(store, {
+        nowMs: body.nowMs || Date.now(),
+        skipActiveProbe: Boolean(body.skipActiveProbe)
+      });
       return sendJson(res, 200, result);
     }
 
@@ -2679,17 +2725,32 @@ async function handleRequest(req, res) {
         return sendError(res, 400, '备份文件结构无效');
       }
       store.transact((st) => {
+        if (Array.isArray(data.nodes) && data.nodes.length > 0) {
+          st.nodes = data.nodes;
+        }
         st.inbounds = data.inbounds;
         st.outbounds = data.outbounds;
         if (data.routing) st.routing = data.routing;
         if (data.dns) st.dns = data.dns;
-        if (data.certificates) st.certificates = data.certificates;
+        if (Array.isArray(data.certificates)) st.certificates = data.certificates;
+        if (Array.isArray(data.failoverLogs)) st.failoverLogs = data.failoverLogs;
+        if (Array.isArray(data.migrations)) st.migrations = data.migrations;
+        if (data.settings?.cfApiToken && !st.settings.cfApiToken) {
+          st.settings.cfApiToken = data.settings.cfApiToken;
+        }
+        ensureClusterNodes(st);
+        syncExitNodeOutbounds(st);
         syncRoutingRulesToInbounds(st);
-        store.addAudit(session.username, 'restore_backup', `恢复 ${data.inbounds.length} 个入站`);
+        store.addAudit(session.username, 'restore_backup', `恢复 ${st.nodes.length} 台服务器、${st.inbounds.length} 个入站与 ${st.outbounds.length} 个出站`);
       });
       const restoredPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
       autoApplyIfEnabled(restoredPorts);
-      return sendJson(res, 200, { ok: true, inboundsCount: store.state.inbounds.length, outboundsCount: store.state.outbounds.length });
+      return sendJson(res, 200, {
+        ok: true,
+        nodesCount: store.state.nodes.length,
+        inboundsCount: store.state.inbounds.length,
+        outboundsCount: store.state.outbounds.length
+      });
     }
 
     return sendError(res, 404, `未找到接口: ${pathname}`, 'not_found');
@@ -2772,6 +2833,8 @@ if (require.main === module) {
     try { cleanupSystemLogsAndMemory(singbox, store); } catch { /* ignore */ }
   }, 6 * 3600 * 1000).unref();
   setInterval(() => singbox.pollConnectionsAndEnforceLimits().catch(() => {}), 1000).unref();
+  setInterval(() => checkClusterHealthAndAutoFailover(store).catch(() => {}), 30000).unref();
+  setInterval(() => syncChangedClusterNodes(store.state, { isDailyTick: true }).catch(() => {}), 24 * 3600 * 1000).unref();
 
   const gracefulShutdown = () => {
     try { singbox.clearAllTempIpBlocks(); } catch { /* ignore */ }

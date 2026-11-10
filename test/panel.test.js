@@ -2373,3 +2373,168 @@ test('22. End-to-End Multi-Relay & Exit Simulation: Create Nodes on Exit Servers
   assert.ok(subSgOnly.text.includes('@sg1.vip.com:443'), 'Per-server aggregate subscription for SG must include SG node');
   assert.ok(!subSgOnly.text.includes('@hk1.vip.com:443'), 'Per-server aggregate subscription for SG must NOT include HK node');
 });
+
+
+test('23. v1.0.2 Multi-Scenario Fault Tolerance: Smart On-Change Sync (0 Idle Traffic), Auto-Failover Watchdog, Exit Fault-Tolerance & Full Cluster Backup/Restore', async () => {
+  const { syncChangedClusterNodes, compileNodeSingboxConfig } = require('../lib/cluster');
+
+  // 1. Verify Smart On-Change Sync: 1st sync pushes changed nodes, 2nd consecutive sync with no changes pushes 0 nodes (0 wasted traffic!)
+  const syncRun1 = await syncChangedClusterNodes(store.state);
+  const syncRun2 = await syncChangedClusterNodes(store.state);
+  assert.equal(syncRun2.length, 0, 'Consecutive syncChangedClusterNodes with zero config changes must push 0 nodes (0 wasted bandwidth)');
+
+  // 2. Verify standbySyncMode = 'on_failover' vs 'on_change'
+  const allNodes = (await req('/SecPath16Chars99/api/cluster/nodes')).json.nodes;
+  const hkNode = allNodes.find((n) => n.domain === 'hk1.vip.com');
+  const standbyNode = allNodes.find((n) => n.role === 'standby');
+  assert.ok(hkNode && standbyNode, 'HK Relay and Standby nodes must exist');
+
+  // Set hkNode to standbySyncMode = 'on_failover' (do not prewarm standby during normal state)
+  await req(`/SecPath16Chars99/api/cluster/nodes/${hkNode.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      standbyNodeId: standbyNode.id,
+      standbySyncMode: 'on_failover',
+      autoFailover: true,
+      autoFailoverMinutes: 2,
+      autoFailback: true
+    })
+  });
+  const sbCompiledBefore = compileNodeSingboxConfig(store.state, standbyNode.id);
+  assert.ok(
+    !sbCompiledBefore.servedNodeIds.includes(hkNode.id),
+    'When standbySyncMode is on_failover, Standby node must remain idle before failover'
+  );
+
+  // Switch back to 'on_change' (default recommended) -> Standby prewarms hkNode inbounds immediately on change
+  await req(`/SecPath16Chars99/api/cluster/nodes/${hkNode.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ standbySyncMode: 'on_change' })
+  });
+  const sbCompiledOnChange = compileNodeSingboxConfig(store.state, standbyNode.id);
+  assert.ok(
+    sbCompiledOnChange.servedNodeIds.includes(hkNode.id),
+    'When standbySyncMode is on_change, Standby node must prewarm Primary inbounds'
+  );
+
+  // 3. Simulate Primary Relay (hkNode) disconnecting for 3 minutes (>= 2m threshold) and test Auto-Failover Watchdog
+  const futureMs = Date.now() + 3 * 60 * 1000;
+  const hcRes1 = await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: futureMs, skipActiveProbe: true })
+  });
+  assert.equal(hcRes1.status, 200);
+  assert.ok(
+    hcRes1.json.actions.some((a) => a.type === 'relay_auto_failover' && a.nodeId === hkNode.id),
+    'Auto-Failover Watchdog must automatically switch offline Primary Relay to Standby after timeout'
+  );
+
+  // Verify hkNode is now failed over to standbyNode
+  const afterFoNodes = (await req('/SecPath16Chars99/api/cluster/nodes')).json.nodes;
+  const hkAfterFo = afterFoNodes.find((n) => n.id === hkNode.id);
+  assert.equal(hkAfterFo.activeFailoverTo, standbyNode.id);
+
+  // 4. Simulate hkNode Agent recovering online, sending a heartbeat with real traffic deltas & online IPs, and triggering Auto-Failback
+  const hkInb = store.state.inbounds.find((i) => i.nodeId === hkNode.id);
+  assert.ok(hkInb, 'HK inbound must exist');
+  const hbRes = await req('/SecPath16Chars99/api/cluster/heartbeat', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${hkAfterFo.token}`, 'X-Nexus-Node': hkNode.id },
+    body: JSON.stringify({
+      nodeId: hkNode.id,
+      configHash: hkAfterFo.configHash || '',
+      metrics: { cpuPct: 2.5, memUsedMB: 16, sbRunning: true },
+      inboundDeltas: { [hkInb.tag]: { up: 1048576, down: 5242880 } },
+      inboundOnline: { [hkInb.tag]: { ips: ['203.0.113.88', '203.0.113.99'], devices: 2 } }
+    })
+  });
+  assert.equal(hbRes.status, 200);
+  assert.equal(hbRes.json.ok, true);
+
+  // Verify remote online IPs and traffic deltas are reflected in GET /api/inbounds
+  const enrichedHkInb = (await req('/SecPath16Chars99/api/inbounds')).json.inbounds.find((i) => i.id === hkInb.id);
+  assert.ok(enrichedHkInb.up >= 1048576, 'Remote Agent heartbeat traffic delta (up) must be accumulated on Master');
+  assert.equal(enrichedHkInb.activeDeviceCount, 2, 'Remote Agent online device count must be displayed on Master');
+  assert.ok(enrichedHkInb.activeIps.includes('203.0.113.88'), 'Remote Agent online client IPs must be displayed on Master');
+
+  // Run health-check now that hkNode is online -> since autoFailback is true, it must automatically fail back!
+  const hcRes2 = await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: Date.now() })
+  });
+  assert.equal(hcRes2.status, 200);
+  assert.ok(
+    hcRes2.json.actions.some((a) => a.type === 'relay_auto_failback' && a.nodeId === hkNode.id),
+    'Watchdog must automatically fail back to Primary Relay once it recovers online'
+  );
+
+  // 5. Verify Relay <-> Exit Fault Tolerance: bind fallbackExitNodeId on US Exit -> UK Exit, simulate US Exit outage -> auto-reroute!
+  const usExit = afterFoNodes.find((n) => n.host === '198.51.100.88');
+  const ukExit = afterFoNodes.find((n) => n.host === '185.199.108.55');
+  assert.ok(usExit && ukExit, 'Both US Exit and UK Exit nodes must exist');
+
+  // Verify automatic High-Availability Exit Pool (`exit-ha-pool`) exists when >= 2 Exit nodes are active
+  const outsBefore = (await req('/SecPath16Chars99/api/outbounds')).json.outbounds;
+  const haPool = outsBefore.find((o) => o.tag === 'exit-ha-pool');
+  assert.ok(haPool, 'When >= 2 Shared Exit servers exist, exit-ha-pool urltest group must be automatically created');
+  assert.equal(haPool.type, 'urltest');
+
+  // Bind UK Exit as fallback for US Exit and simulate US Exit going offline
+  await req(`/SecPath16Chars99/api/cluster/nodes/${usExit.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      fallbackExitNodeId: ukExit.id,
+      autoFailoverMinutes: 2,
+      status: 'offline'
+    })
+  });
+
+  const hcExitRes = await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: Date.now() + 3 * 60 * 1000, skipActiveProbe: true })
+  });
+  assert.equal(hcExitRes.status, 200);
+  assert.ok(
+    hcExitRes.json.actions.some((a) => a.type === 'exit_auto_failover' && a.nodeId === usExit.id),
+    'Watchdog must automatically reroute failed Exit server to its bound fallbackExitNodeId'
+  );
+
+  // Verify the US Exit outbound now points to UK Exit's IP (185.199.108.55) so all Relay servers bound to it stay online!
+  const outsDuringExitFo = (await req('/SecPath16Chars99/api/outbounds')).json.outbounds;
+  const usSharedOut = outsDuringExitFo.find((o) => o.exitNodeId === usExit.id && !o.linkedInboundId);
+  assert.equal(usSharedOut.server, '185.199.108.55', 'Failed Exit outbound must automatically switch target IP to healthy fallback Exit IP');
+
+  // Recover US Exit online and verify automatic failback to 198.51.100.88
+  await req(`/SecPath16Chars99/api/cluster/heartbeat`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${usExit.token}`, 'X-Nexus-Node': usExit.id },
+    body: JSON.stringify({ nodeId: usExit.id, metrics: { cpuPct: 1.1, memUsedMB: 12, sbRunning: true } })
+  });
+  await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: Date.now() })
+  });
+  const outsAfterExitFb = (await req('/SecPath16Chars99/api/outbounds')).json.outbounds;
+  const usSharedOutRecovered = outsAfterExitFb.find((o) => o.exitNodeId === usExit.id && !o.linkedInboundId);
+  assert.equal(usSharedOutRecovered.server, '198.51.100.88', 'Recovered Exit outbound must automatically restore original IP');
+
+  // 6. Verify Master Control Plane Full Cluster Snapshot Backup & Restore (/api/backup -> /api/restore)
+  const backupRes = await req('/SecPath16Chars99/api/backup');
+  assert.equal(backupRes.status, 200);
+  const backupSnapshot = backupRes.json;
+  const origNodeCount = backupSnapshot.nodes.length;
+  const origInbCount = backupSnapshot.inbounds.length;
+
+  // Simulate wiping nodes and restoring from snapshot on a new Master server
+  store.transact((st) => {
+    st.nodes = [];
+    st.inbounds = [];
+  });
+  const restoreRes = await req('/SecPath16Chars99/api/restore', {
+    method: 'POST',
+    body: JSON.stringify({ backup: backupSnapshot })
+  });
+  assert.equal(restoreRes.status, 200);
+  assert.equal(restoreRes.json.nodesCount, origNodeCount, 'POST /api/restore must restore all cluster server nodes');
+  assert.equal(restoreRes.json.inboundsCount, origInbCount, 'POST /api/restore must restore all inbounds across all servers');
+});
