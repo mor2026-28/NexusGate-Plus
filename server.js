@@ -72,7 +72,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.5';
+const VERSION = '1.0.6';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -136,12 +136,22 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
     st.settings.defaultTlsDomain = cert.domain;
     st.settings.defaultCertFile = cert.certPath;
     st.settings.defaultKeyFile = cert.keyPath;
+    const nodesById = new Map((st.nodes || []).map((n) => [n.id, n]));
     for (const inb of st.inbounds || []) {
       if (inb.security === 'reality') {
         delete inb.certPath;
         delete inb.keyPath;
       } else if (inb.security === 'tls') {
-        const inbCertMissingOrSelf = !inb.certPath || !fs.existsSync(inb.certPath) || isCertFileSelfSigned(inb.certPath);
+        const ownerNode = nodesById.get(inb.nodeId || 'node_local');
+        if (ownerNode && !ownerNode.isLocal && ownerNode.domain && ownerNode.domain !== cert.domain) {
+          continue;
+        }
+        const inbCertObj = (st.certificates || []).find((c) => c.certPath === inb.certPath || (inb.tlsDomain && c.domain === inb.tlsDomain));
+        const hasEmbeddedValidCert = Boolean(inbCertObj && inbCertObj.certPem && inbCertObj.type !== 'self-signed' && !inbCertObj.isSelfSigned);
+        if (hasEmbeddedValidCert && inbCertObj.domain && inbCertObj.domain !== cert.domain) {
+          continue;
+        }
+        const inbCertMissingOrSelf = !hasEmbeddedValidCert && (!inb.certPath || !fs.existsSync(inb.certPath) || isCertFileSelfSigned(inb.certPath));
         const matchesPreviousDefault =
           (prevDefaultDomain && inb.tlsDomain === prevDefaultDomain) ||
           (prevDefaultCert && inb.certPath === prevDefaultCert);
@@ -176,7 +186,7 @@ function syncDiscoveredCerts(force = false) {
   store.state.certificates = (store.state.certificates || []).filter((c) => {
     if (c.domain === 'www.bing.com') return false;
     if (deletedDomains.has(c.domain) || deletedPaths.has(c.certPath)) return false;
-    if (c.certPath && !fs.existsSync(c.certPath)) return false;
+    if (c.certPath && !c.certPem && !fs.existsSync(c.certPath)) return false;
     return true;
   });
   if (store.state.certificates.length !== beforeLen) changed = true;
@@ -296,6 +306,7 @@ function syncInboundRelayToRoutingRule(st, inbound) {
     const relayRule = {
       id: existingIdx >= 0 ? st.routing.rules[existingIdx].id : `rule_relay_${crypto.randomBytes(4).toString('hex')}`,
       remark: isAutoRuleRemark(prevRemark) ? buildAutoRuleRemark([inbound.tag], inbound.outboundTag) : prevRemark,
+      nodeId: inbound.nodeId || 'node_local',
       enabled: true,
       action: 'route',
       inbound: [inbound.tag],
@@ -1068,10 +1079,21 @@ function normalizeInboundPayload(body, existing = null) {
       : rawReqDomain;
     const matchedDomainCert = (store.state.certificates || []).find((c) => c.domain === inbound.tlsDomain && c.valid !== false)
       || (store.state.certificates || []).find((c) => c.domain === inbound.tlsDomain);
-    const defCert = matchedDomainCert?.certPath || realCert?.certPath || store.state.settings.defaultCertFile || store.state.settings.webCertFile || '';
-    const defKey = matchedDomainCert?.keyPath || realCert?.keyPath || store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || '';
-    inbound.certPath = String(body.certPath || (matchedDomainCert ? matchedDomainCert.certPath : '') || existing?.certPath || defCert).trim();
-    inbound.keyPath = String(body.keyPath || (matchedDomainCert ? matchedDomainCert.keyPath : '') || existing?.keyPath || defKey).trim();
+    const masterCertPath = realCert?.certPath || store.state.settings.defaultCertFile || store.state.settings.webCertFile || '';
+    const masterKeyPath = realCert?.keyPath || store.state.settings.defaultKeyFile || store.state.settings.webKeyFile || '';
+    const bodyCertIsMasterDefault = body.certPath && body.certPath === masterCertPath && inbound.tlsDomain !== masterDefDomain;
+    const effectiveBodyCert = bodyCertIsMasterDefault ? '' : String(body.certPath || '').trim();
+    const effectiveBodyKey = bodyCertIsMasterDefault ? '' : String(body.keyPath || '').trim();
+    const fallbackRelayCert = (inbound.tlsDomain && inbound.tlsDomain !== 'www.apple.com' && inbound.tlsDomain !== masterDefDomain)
+      ? `/root/cert/${inbound.tlsDomain}/fullchain.pem`
+      : masterCertPath;
+    const fallbackRelayKey = (inbound.tlsDomain && inbound.tlsDomain !== 'www.apple.com' && inbound.tlsDomain !== masterDefDomain)
+      ? `/root/cert/${inbound.tlsDomain}/privkey.pem`
+      : masterKeyPath;
+    const defCert = matchedDomainCert?.certPath || fallbackRelayCert;
+    const defKey = matchedDomainCert?.keyPath || fallbackRelayKey;
+    inbound.certPath = String((matchedDomainCert && !effectiveBodyCert ? matchedDomainCert.certPath : effectiveBodyCert) || existing?.certPath || defCert).trim();
+    inbound.keyPath = String((matchedDomainCert && !effectiveBodyKey ? matchedDomainCert.keyPath : effectiveBodyKey) || existing?.keyPath || defKey).trim();
     inbound.allowInsecure = Boolean(body.allowInsecure ?? existing?.allowInsecure ?? false);
     inbound.alpn = Array.isArray(body.alpn)
       ? body.alpn
@@ -1607,7 +1629,7 @@ async function handleRequest(req, res) {
           nodes: nodes.length,
           relayNodes: nodes.filter((n) => n.role === 'relay' || n.role === 'hybrid').length,
           exitNodes: nodes.filter((n) => n.role === 'exit' || n.role === 'hybrid').length,
-          standbyNodes: nodes.filter((n) => n.role === 'standby' || n.mirrorStandby).length,
+          standbyNodes: nodes.filter((n) => n.role === 'standby').length,
           inbounds: inbounds.length,
           activeInbounds: inbounds.filter((i) => i.enable !== false).length,
           clients: totalClients,
@@ -2663,7 +2685,31 @@ async function handleRequest(req, res) {
         }
         if (body.host !== undefined) existing.host = String(body.host).trim() || existing.host;
         if (body.agentPort !== undefined) existing.agentPort = Number(body.agentPort || 19090);
-        if (body.domain !== undefined) existing.domain = String(body.domain).trim();
+        if (body.domain !== undefined) {
+          const prevDom = existing.domain || '';
+          const nextDom = String(body.domain).trim();
+          existing.domain = nextDom;
+          if (existing.isLocal && nextDom) {
+            st.settings.webDomain = nextDom;
+          }
+          if (nextDom && nextDom !== prevDom) {
+            const domCert = (st.certificates || []).find((c) => c.domain === nextDom && c.valid !== false);
+            for (const inb of st.inbounds || []) {
+              if ((inb.nodeId || 'node_local') === existing.id) {
+                if (!inb.publicHost || inb.publicHost === prevDom || inb.publicHost === existing.host) {
+                  inb.publicHost = nextDom;
+                }
+                if (inb.security === 'tls' && (!inb.tlsDomain || inb.tlsDomain === prevDom || inb.tlsDomain === 'www.apple.com')) {
+                  inb.tlsDomain = nextDom;
+                  if (domCert) {
+                    inb.certPath = domCert.certPath;
+                    inb.keyPath = domCert.keyPath;
+                  }
+                }
+              }
+            }
+          }
+        }
         if (body.region !== undefined) existing.region = String(body.region).trim();
         if (body.isp !== undefined) existing.isp = String(body.isp).trim();
         if (body.standbyNodeId !== undefined) existing.standbyNodeId = String(body.standbyNodeId).trim();
@@ -2719,11 +2765,32 @@ async function handleRequest(req, res) {
           err.statusCode = 404;
           throw err;
         }
+        const removedOutTags = new Set(
+          (st.outbounds || []).filter((o) => o.exitNodeId === clusterNodeMatch.id).map((o) => o.tag)
+        );
         st.nodes = st.nodes.filter((n) => n.id !== clusterNodeMatch.id);
-        for (const inb of st.inbounds || []) {
-          if (inb.nodeId === clusterNodeMatch.id) inb.nodeId = 'node_local';
+        for (const n of st.nodes || []) {
+          if (n.standbyNodeId === clusterNodeMatch.id) n.standbyNodeId = '';
+          if (n.activeFailoverTo === clusterNodeMatch.id) n.activeFailoverTo = '';
+          if (n.fallbackExitNodeId === clusterNodeMatch.id) n.fallbackExitNodeId = '';
         }
+        const localPorts = new Set(
+          (st.inbounds || []).filter((i) => (i.nodeId || 'node_local') === 'node_local').map((i) => Number(i.port))
+        );
+        st.inbounds = (st.inbounds || []).filter((inb) => {
+          if (inb.nodeId === clusterNodeMatch.id) {
+            if (localPorts.has(Number(inb.port))) return false;
+            inb.nodeId = 'node_local';
+            localPorts.add(Number(inb.port));
+          }
+          if (inb.outboundTag && removedOutTags.has(inb.outboundTag)) {
+            inb.outboundTag = 'default';
+          }
+          return true;
+        });
         st.outbounds = (st.outbounds || []).filter((o) => o.exitNodeId !== clusterNodeMatch.id);
+        st.routing.rules = (st.routing.rules || []).filter((r) => !removedOutTags.has(r.outbound));
+        syncExitNodeOutbounds(st);
         store.addAudit(session.username, 'delete_cluster_node', target.name);
       });
       autoApplyIfEnabled();

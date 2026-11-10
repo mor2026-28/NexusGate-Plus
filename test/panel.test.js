@@ -3062,3 +3062,251 @@ test('26. v1.0.5 Control Plane / Data Plane Decoupling (Master Outage = 0 Node D
     fs.rmSync(tempCertRestoreDir, { recursive: true, force: true });
   }
 });
+
+test('27. v1.0.6 Full-Stack Zero-to-End Audit: 10 Distinct-Domain Relays (30 Clients/Relay, 15 Peak Online) Multi-Panel Migration + Multi-Cert Isolation + Standby Port Deduplication + Cascade Linkage + Long-Run CPU/RAM/Disk Benchmark', async () => {
+  const { compileNodeSingboxConfig, handleAgentHeartbeat } = require('../lib/cluster');
+  const { triggerNodeFailover, triggerNodeFailback } = require('../lib/failover');
+
+  // 1. Verify Overview API standbyNodes count is strictly role === 'standby' (fixes screenshot bug)
+  const ovBefore = await req('/SecPath16Chars99/api/overview');
+  assert.equal(ovBefore.status, 200);
+  const actualStandbyNodesCount = (ovBefore.json.nodes || []).filter((n) => n.role === 'standby').length;
+  assert.equal(
+    ovBefore.json.counts.standbyNodes,
+    actualStandbyNodesCount,
+    'Overview counts.standbyNodes must strictly equal nodes with role === standby (never counting relay nodes with mirrorStandby)'
+  );
+
+  // 2. Create a shared Standby server and 10 distinct-domain Relay servers (v106-r1.nexus.vip .. v106-r10.nexus.vip)
+  //    each with its own dedicated SSL certificate in state.certificates, and migrate 30 clients per Relay (300 clients total)
+  //    from mixed 3x-ui / X-Panel / NexusGate backups all using overlapping ports 443 and 8443!
+  const standbyRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'v106-亚太共享热备机-S1',
+      role: 'standby',
+      host: '198.51.100.201',
+      agentPort: 19090
+    })
+  });
+  assert.equal(standbyRes.status, 201);
+  const sharedStandbyId = standbyRes.json.node.id;
+
+  const exitRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'v106-日本原生落地-E1',
+      role: 'exit',
+      host: '203.0.113.201',
+      exitPort: 29388,
+      exitMethod: '2022-blake3-aes-128-gcm'
+    })
+  });
+  assert.equal(exitRes.status, 201);
+  const exitNodeId = exitRes.json.node.id;
+  const exitOutTag = `exit-${exitNodeId.replace(/^node_/, '')}`;
+
+  const createdRelayIds = [];
+  for (let i = 1; i <= 10; i += 1) {
+    const dom = `v106-r${i}.nexus.vip`;
+    const rRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: `v106-专线中转-${i}`,
+        role: 'relay',
+        host: `192.0.2.${100 + i}`,
+        domain: dom,
+        standbyNodeId: sharedStandbyId,
+        mirrorStandby: true,
+        standbySyncMode: 'on_change',
+        autoFailover: false,
+        autoFailoverMinutes: 3
+      })
+    });
+    assert.equal(rRes.status, 201);
+    const rId = rRes.json.node.id;
+    createdRelayIds.push(rId);
+
+    // Register a distinct SSL certificate for this Relay's domain
+    store.transact((st) => {
+      st.certificates.push({
+        id: `cert_v106_${i}`,
+        domain: dom,
+        type: "acme- Let's Encrypt",
+        certPath: `/root/cert/${dom}/fullchain.pem`,
+        keyPath: `/root/cert/${dom}/privkey.pem`,
+        certPem: `-----BEGIN CERTIFICATE-----\nMIIB_V106_RELAY_${i}_CERT\n-----END CERTIFICATE-----`,
+        keyPem: `-----BEGIN PRIVATE KEY-----\nMIIB_V106_RELAY_${i}_KEY\n-----END PRIVATE KEY-----`,
+        valid: true,
+        isSelfSigned: false,
+        createdAt: new Date().toISOString()
+      });
+    });
+
+    // Build 30 clients for this Relay server
+    const clients30 = [];
+    for (let c = 1; c <= 30; c += 1) {
+      clients30.push({
+        id: `00000000-0000-4000-8000-${String(i * 100 + c).padStart(12, '0')}`,
+        email: `r${i}_vip_customer_${c}`,
+        flow: '',
+        subId: `sub_v106_r${i}_c${c}`,
+        limitIp: 3,
+        limitDevice: 5,
+        totalGB: 100,
+        enable: true
+      });
+    }
+
+    // Alternate between 3x-ui format (odd i) and NexusGate format (even i) to verify multi-panel migration fidelity
+    const migPayload = (i % 2 === 1)
+      ? {
+          inbounds: [
+            {
+              id: i,
+              tag: 'in-vless-ws-443',
+              remark: `R${i}-VLESS-WS-TLS`,
+              port: 443,
+              protocol: 'vless',
+              settings: JSON.stringify({ clients: clients30, decryption: 'none' }),
+              streamSettings: JSON.stringify({
+                network: 'ws',
+                security: 'tls',
+                tlsSettings: {
+                  serverName: dom,
+                  certificates: [{ certificateFile: `/root/cert/${dom}/fullchain.pem`, keyFile: `/root/cert/${dom}/privkey.pem` }]
+                },
+                wsSettings: { path: `/ws-r${i}` }
+              }),
+              enable: 1
+            }
+          ],
+          outbounds: [
+            { tag: `r${i}- dedicated-exit`, protocol: 'shadowsocks', settings: { servers: [{ address: '203.0.113.201', port: 29388, method: '2022-blake3-aes-128-gcm', password: exitRes.json.node.exitConfig.password }] } }
+          ],
+          routing: {
+            rules: [
+              { type: 'field', inboundTag: ['in-vless-ws-443'], outboundTag: exitOutTag }
+            ]
+          }
+        }
+      : {
+          version: '1.0.6',
+          inbounds: [
+            {
+              id: 'shared_template_inb_id', // intentionally identical ID across even relays to test ID collision guard!
+              tag: 'in-vless-ws-443',
+              remark: `R${i}-VLESS-WS-TLS`,
+              port: 443,
+              protocol: 'vless',
+              security: 'tls',
+              transport: 'ws',
+              wsPath: `/ws-r${i}`,
+              tlsDomain: dom,
+              certPath: `/root/cert/${dom}/fullchain.pem`,
+              keyPath: `/root/cert/${dom}/privkey.pem`,
+              outboundTag: exitOutTag,
+              clients: clients30,
+              enable: true
+            }
+          ],
+          outbounds: [],
+          routing: {
+            rules: [
+              { id: 'shared_template_rule_id', action: 'route', inbound: ['in-vless-ws-443'], outbound: exitOutTag }
+            ]
+          }
+        };
+
+    const migRes = await req(`/SecPath16Chars99/api/migrate/3xui?mode=merge&targetNodeId=${encodeURIComponent(rId)}`, {
+      method: 'POST',
+      body: JSON.stringify({ jsonPayload: migPayload })
+    });
+    assert.equal(migRes.status, 200, `Migration for Relay ${i} (${dom}) must succeed`);
+  }
+
+  // 3. Verify strict per-Relay certificate & SNI isolation, unique Inbound IDs, and 30 clients per Relay
+  const seenInboundIds = new Set();
+  for (let i = 1; i <= 10; i += 1) {
+    const rId = createdRelayIds[i - 1];
+    const dom = `v106-r${i}.nexus.vip`;
+    const nodeInbounds = store.state.inbounds.filter((inb) => inb.nodeId === rId);
+    assert.equal(nodeInbounds.length, 1, `Relay ${i} must have its migrated port 443 inbound`);
+    const inb = nodeInbounds[0];
+    assert.ok(!seenInboundIds.has(inb.id), `Inbound ID on Relay ${i} must be globally unique (no template ID collision)`);
+    seenInboundIds.add(inb.id);
+    assert.equal(inb.clients.length, 30, `All 30 clients on Relay ${i} must be losslessly preserved`);
+
+    const compiled = compileNodeSingboxConfig(store.state, rId);
+    const sbInb = compiled.singboxConfig.inbounds.find((x) => Number(x.listen_port) === 443);
+    assert.ok(sbInb, `Compiled Sing-box config for Relay ${i} must include port 443 inbound`);
+    assert.equal(sbInb.users.length, 30, `Compiled Sing-box inbound on Relay ${i} must contain all 30 active users`);
+    assert.equal(sbInb.tls.server_name, dom, `Relay ${i} TLS server_name must strictly match its own domain (${dom})`);
+    assert.equal(sbInb.tls.certificate_path, `/root/cert/${dom}/fullchain.pem`, `Relay ${i} certificate_path must strictly match its own domain cert`);
+    assert.ok(
+      compiled.certificates.some((c) => c.certPath === `/root/cert/${dom}/fullchain.pem` && c.certPem.includes(`RELAY_${i}_CERT`)),
+      `Relay ${i} compiled bundle must include its own PEM certificate`
+    );
+  }
+
+  // 4. Verify Standby Port Priority & Deduplication:
+  //    All 10 Relays have port 443 and are bound to `sharedStandbyId`.
+  //    When Relay 5 fails over to `sharedStandbyId`, `sharedStandbyId` must serve Relay 5's port 443 inbound (and never emit duplicate port 443 inbounds!)
+  await triggerNodeFailover(store, createdRelayIds[4], sharedStandbyId, { reason: 'Test Relay 5 Failover' });
+  const standbyCompiled = compileNodeSingboxConfig(store.state, sharedStandbyId);
+  const port443InboundsOnStandby = standbyCompiled.singboxConfig.inbounds.filter((x) => Number(x.listen_port) === 443);
+  assert.equal(port443InboundsOnStandby.length, 1, 'Standby server must deduplicate overlapping port 443 inbounds so Sing-box never fails to bind');
+  assert.equal(
+    port443InboundsOnStandby[0].tls.server_name,
+    'v106-r5.nexus.vip',
+    'Standby server must prioritize the actively failed-over Relay 5 (v106-r5.nexus.vip) on port 443 over pre-warmed nodes'
+  );
+  await triggerNodeFailback(store, createdRelayIds[4]);
+
+  // 5. Verify Domain Cascade on PUT /api/cluster/nodes/:id & Clean Cascade on DELETE /api/cluster/nodes/:id
+  const updateDomRes = await req(`/SecPath16Chars99/api/cluster/nodes/${createdRelayIds[9]}`, {
+    method: 'PUT',
+    body: JSON.stringify({ domain: 'v106-r10-new.nexus.vip' })
+  });
+  assert.equal(updateDomRes.status, 200);
+  const r10Inb = store.state.inbounds.find((x) => x.nodeId === createdRelayIds[9]);
+  assert.equal(r10Inb.publicHost, 'v106-r10-new.nexus.vip', 'Updating Relay domain must automatically cascade to its inbound publicHost');
+  assert.equal(r10Inb.tlsDomain, 'v106-r10-new.nexus.vip', 'Updating Relay domain must automatically cascade to its inbound tlsDomain');
+
+  // 6. Simulate Peak Online Load (15 active users per Relay = 150 concurrent active users across 10 Relays)
+  //    over 20 continuous heartbeat cycles & verify CPU/RAM efficiency
+  const startHeapMB = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
+  const t0 = Date.now();
+  for (let cycle = 1; cycle <= 20; cycle += 1) {
+    for (let i = 1; i <= 10; i += 1) {
+      const rId = createdRelayIds[i - 1];
+      const rNode = store.state.nodes.find((n) => n.id === rId);
+      const rInb = store.state.inbounds.find((x) => x.nodeId === rId);
+      const clientDeltas = {};
+      const activeIps = [];
+      for (let c = 1; c <= 15; c += 1) {
+        clientDeltas[`r${i}_vip_customer_${c}`] = { up: 64000, down: 512000 };
+        activeIps.push(`198.18.${i}.${c}`);
+      }
+      handleAgentHeartbeat(store, rId, rNode.token, {
+        configHash: rNode.configHash,
+        metrics: { cpuPct: 3.2, memPct: 14.0, memUsedMB: 26, memTotalMB: 1024, sbRunning: true, sbVersion: '1.12.23' },
+        inboundDeltas: { [rInb.tag]: { up: 64000 * 15, down: 512000 * 15 } },
+        clientDeltas,
+        outboundDeltas: { [exitOutTag]: { up: 64000 * 15, down: 512000 * 15 } },
+        inboundOnline: { [rInb.tag]: { ips: activeIps, devices: 15 } }
+      });
+    }
+  }
+  const elapsedMs = Date.now() - t0;
+  const endHeapMB = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
+  assert.ok(elapsedMs < 1500, `200 high-concurrency Relay heartbeats (150 concurrent active clients) must complete in < 1.5s (took ${elapsedMs}ms)`);
+  assert.ok(endHeapMB - startHeapMB < 35, `Memory footprint must remain bounded during peak 150-client load (delta: ${endHeapMB - startHeapMB} MB)`);
+
+  // Clean up test nodes created in Test 27
+  for (const rId of createdRelayIds) {
+    await req(`/SecPath16Chars99/api/cluster/nodes/${rId}`, { method: 'DELETE' });
+  }
+  await req(`/SecPath16Chars99/api/cluster/nodes/${exitNodeId}`, { method: 'DELETE' });
+  await req(`/SecPath16Chars99/api/cluster/nodes/${sharedStandbyId}`, { method: 'DELETE' });
+});

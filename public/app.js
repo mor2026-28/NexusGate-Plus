@@ -269,7 +269,7 @@ function updateSidebarBadges() {
   const inbEl = $('#nav-badge-inbounds');
   const outEl = $('#nav-badge-outbounds');
   const nodeCnt = (state.nodes && state.nodes.length) || state.overview?.counts?.nodes || 1;
-  const inbCnt = (state.inbounds && state.inbounds.length) || state.overview?.counts?.inbounds || 0;
+  const inbCnt = (state.inbounds && state.inbounds.length) || (state.clusterInboundsSummary && state.clusterInboundsSummary.length) || state.overview?.counts?.inbounds || 0;
   const outCnt = (state.outbounds && state.outbounds.filter((o) => !o.builtin).length) || state.overview?.counts?.outbounds || 0;
   if (clEl) clEl.textContent = String(nodeCnt);
   if (inbEl) inbEl.textContent = String(inbCnt);
@@ -370,7 +370,7 @@ async function load(page = state.page, options = {}) {
       state.nodes = cl.nodes || [];
       state.failoverLogs = cl.failoverLogs || [];
       if (Array.isArray(cl.outbounds)) state.outbounds = cl.outbounds;
-      if (Array.isArray(cl.inbounds) && !state.inbounds.length) state.inbounds = cl.inbounds;
+      if (Array.isArray(cl.inbounds)) state.clusterInboundsSummary = cl.inbounds;
     } else if (page === 'inbounds') {
       const data = await api('/api/inbounds');
       if (page !== state.page || seq !== currentLoadSeq) return;
@@ -467,7 +467,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.5 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.6 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -529,13 +529,13 @@ function renderOverview() {
   const clusterNodes = state.nodes?.length ? state.nodes : (ov.nodes || []);
   const relayCnt = counts.relayNodes || clusterNodes.filter((n) => n.role === 'relay' || n.role === 'hybrid').length || 1;
   const exitCnt = counts.exitNodes || clusterNodes.filter((n) => n.role === 'exit' || n.role === 'hybrid').length || 0;
-  const standbyCnt = counts.standbyNodes || clusterNodes.filter((n) => n.role === 'standby' || n.mirrorStandby).length || 0;
+  const standbyCnt = counts.standbyNodes !== undefined ? counts.standbyNodes : clusterNodes.filter((n) => n.role === 'standby').length;
 
   return `
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.0</span>
+          <span class="tag">NexusGate Plus v1.0.6</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -845,7 +845,7 @@ function renderCluster() {
       </article>
       <article class="metric" style="--accent:#059669">
         <span>全局共享落地池 (Exit SS)</span>
-        <strong>${exitNodes.length + customOutbounds.filter((o) => !o.exitNodeId).length} <small style="display:inline;font-size:13px;font-weight:700">个</small></strong>
+        <strong>${exitNodes.length + customOutbounds.filter((o) => !o.exitNodeId && !o.sharedExitHaPool).length} <small style="display:inline;font-size:13px;font-weight:700">个</small></strong>
         <small>纯 IP 落地免域名 · 多台中转交叉复用</small>
       </article>
       <article class="metric" style="--accent:#d97706">
@@ -3051,7 +3051,7 @@ async function openInboundModal(existing = null, preset = '') {
     };
 
     renderSecAndTrans();
-    $('#inb-sec-select')?.addEventListener('change', renderSecAndTrans);
+    $('#inb-sec-select')?.addEventListener('change', () => { renderSecAndTrans(); if (!existing) syncInboundNodeDomain(); });
     $('#inb-trans-select')?.addEventListener('change', renderSecAndTrans);
   };
 
@@ -3064,14 +3064,15 @@ async function openInboundModal(existing = null, preset = '') {
       item.tlsDomain = nodeDom;
       const domInput = $('#inb-tls-domain');
       if (domInput) domInput.value = nodeDom;
-      const matchedCert = (state.certificates || []).find((c) => c.domain === nodeDom);
-      if (matchedCert) {
-        item.certPath = matchedCert.certPath;
-        item.keyPath = matchedCert.keyPath;
-        if ($('#inb-cert-path')) $('#inb-cert-path').value = matchedCert.certPath;
-        if ($('#inb-key-path')) $('#inb-key-path').value = matchedCert.keyPath;
-        if ($('#inb-cert-select')) $('#inb-cert-select').value = matchedCert.domain;
-      }
+      const matchedCert = (state.certificates || []).find((c) => c.domain === nodeDom)
+        || (state.certificates || []).find((c) => c.domain?.startsWith('*.') && nodeDom.endsWith(c.domain.slice(1)));
+      const nextCertPath = matchedCert ? matchedCert.certPath : `/root/cert/${nodeDom}/fullchain.pem`;
+      const nextKeyPath = matchedCert ? matchedCert.keyPath : `/root/cert/${nodeDom}/privkey.pem`;
+      item.certPath = nextCertPath;
+      item.keyPath = nextKeyPath;
+      if ($('#inb-cert-path')) $('#inb-cert-path').value = nextCertPath;
+      if ($('#inb-key-path')) $('#inb-key-path').value = nextKeyPath;
+      if (matchedCert && $('#inb-cert-select')) $('#inb-cert-select').value = matchedCert.domain;
     }
   };
 
