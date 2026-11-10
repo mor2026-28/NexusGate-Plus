@@ -57,7 +57,7 @@ const {
   handleAgentHeartbeat,
   buildAgentInstallCommand
 } = require('./lib/cluster');
-const { triggerNodeFailover, triggerNodeFailback, updateCloudflareDnsIp } = require('./lib/failover');
+const { triggerNodeFailover, triggerNodeFailback, updateCloudflareDnsIp, verifyCloudflareDomainAccess } = require('./lib/failover');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
 const VERSION = '1.0.0';
@@ -1730,10 +1730,25 @@ async function handleRequest(req, res) {
 
     // 10. Routing & Diversion
     if (pathname === '/api/routing' && method === 'GET') {
+      ensureClusterNodes(store.state);
       return sendJson(res, 200, {
+        nodes: store.state.nodes || [],
         routing: store.state.routing,
         dns: store.state.dns,
-        inbounds: store.state.inbounds.map((i) => ({ id: i.id, tag: i.tag, remark: i.remark, port: i.port, protocol: i.protocol, outboundTag: i.outboundTag })),
+        inbounds: store.state.inbounds.map((i) => {
+          const nObj = (store.state.nodes || []).find((n) => n.id === (i.nodeId || 'node_local'));
+          return {
+            id: i.id,
+            nodeId: i.nodeId || 'node_local',
+            nodeName: nObj?.name || '主控本机',
+            nodeDomain: nObj?.domain || '',
+            tag: i.tag,
+            remark: i.remark,
+            port: i.port,
+            protocol: i.protocol,
+            outboundTag: i.outboundTag
+          };
+        }),
         outbounds: (store.state.outbounds || []).map((o) => ({ ...o, singboxPreview: toSingboxOutbound(o) }))
       });
     }
@@ -1759,6 +1774,7 @@ async function handleRequest(req, res) {
         id: `rule_${crypto.randomBytes(5).toString('hex')}`,
         remark: isAutoRuleRemark(rawPostRemark) ? buildAutoRuleRemark(parsedInbounds, parsedOutbound) : rawPostRemark,
         enabled: body.enabled !== false,
+        nodeId: String(body.nodeId || '').trim(),
         action: body.action || 'route',
         inbound: parsedInbounds,
         user: splitList(body.user),
@@ -1821,6 +1837,7 @@ async function handleRequest(req, res) {
         st.routing.rules[idx] = {
           ...existing,
           remark: nextRemark,
+          nodeId: body.nodeId !== undefined ? String(body.nodeId).trim() : (existing.nodeId || ''),
           enabled: body.enabled !== undefined ? Boolean(body.enabled) : existing.enabled,
           inbound: nextInbound,
           user: body.user !== undefined ? splitList(body.user) : (existing.user || []),
@@ -1880,6 +1897,7 @@ async function handleRequest(req, res) {
       const body = await readJson(req);
       const preset = body.preset;
       const targetOutbound = body.outbound || 'direct';
+      const ruleNodeId = String(body.nodeId || '').trim();
       store.transact((st) => {
         if (preset === '3xui-default') {
           const relayRules = (st.routing.rules || []).filter(
@@ -1895,6 +1913,7 @@ async function handleRequest(req, res) {
           st.routing.rules.push({
             id: `rule_${crypto.randomBytes(4).toString('hex')}`,
             remark: `AI 平台分流 (ChatGPT/Claude/Gemini/Grok/Perplexity/Cursor -> ${targetOutbound})`,
+            nodeId: ruleNodeId,
             enabled: true,
             action: 'route',
             inbound: [],
@@ -1921,6 +1940,7 @@ async function handleRequest(req, res) {
           st.routing.rules.push({
             id: `rule_${crypto.randomBytes(4).toString('hex')}`,
             remark: `外贸跨境与海外社媒分流 (Google/WhatsApp/TikTok/Meta/PayPal/Amazon -> ${targetOutbound})`,
+            nodeId: ruleNodeId,
             enabled: true,
             action: 'route',
             inbound: [],
@@ -1947,6 +1967,7 @@ async function handleRequest(req, res) {
           st.routing.rules.push({
             id: `rule_${crypto.randomBytes(4).toString('hex')}`,
             remark: '屏蔽常见广告与追踪域名',
+            nodeId: ruleNodeId,
             enabled: true,
             action: 'route',
             inbound: [],
@@ -1967,6 +1988,7 @@ async function handleRequest(req, res) {
           st.routing.rules.push({
             id: `rule_${crypto.randomBytes(4).toString('hex')}`,
             remark: '中国大陆常见网站与 IP 直连',
+            nodeId: ruleNodeId,
             enabled: true,
             action: 'route',
             inbound: [],
@@ -1987,6 +2009,7 @@ async function handleRequest(req, res) {
           st.routing.rules.push({
             id: `rule_${crypto.randomBytes(4).toString('hex')}`,
             remark: `流媒体解锁分流 (Netflix/Disney+/YouTube -> ${targetOutbound})`,
+            nodeId: ruleNodeId,
             enabled: true,
             action: 'route',
             inbound: [],
@@ -2136,12 +2159,13 @@ async function handleRequest(req, res) {
           mirrorStandby: body.mirrorStandby !== false,
           activeFailoverTo: '',
           failoverAt: '',
+          cfApiToken: String(body.cfApiToken || '').trim(),
           cfZoneId: String(body.cfZoneId || '').trim(),
           cfRecordId: String(body.cfRecordId || '').trim(),
           cfRecordName: String(body.cfRecordName || domain || '').trim(),
           cfProxied: Boolean(body.cfProxied),
           exitConfig: {
-            enabled: Boolean(body.exitPort || body.exitConfig?.enabled),
+            enabled: body.exitEnabled !== false && (role === 'exit' || role === 'hybrid' || Boolean(body.exitPort || body.exitConfig?.enabled)),
             protocol: 'shadowsocks',
             port: exitPort,
             method: exitMethod,
@@ -2198,6 +2222,7 @@ async function handleRequest(req, res) {
         if (body.isp !== undefined) existing.isp = String(body.isp).trim();
         if (body.standbyNodeId !== undefined) existing.standbyNodeId = String(body.standbyNodeId).trim();
         if (body.mirrorStandby !== undefined) existing.mirrorStandby = Boolean(body.mirrorStandby);
+        if (body.cfApiToken !== undefined) existing.cfApiToken = String(body.cfApiToken).trim();
         if (body.cfZoneId !== undefined) existing.cfZoneId = String(body.cfZoneId).trim();
         if (body.cfRecordName !== undefined) existing.cfRecordName = String(body.cfRecordName).trim();
         if (body.cfProxied !== undefined) existing.cfProxied = Boolean(body.cfProxied);
@@ -2257,6 +2282,30 @@ async function handleRequest(req, res) {
       );
       store.save();
       return sendJson(res, 200, { ok: true, count: results.length, results });
+    }
+
+    const clusterNodeTestCf = route('/api/cluster/nodes/:id/test-cf', pathname);
+    if (clusterNodeTestCf && method === 'POST') {
+      ensureClusterNodes(store.state);
+      const node = (store.state.nodes || []).find((n) => n.id === clusterNodeTestCf.id);
+      if (!node) return sendError(res, 404, '未找到该集群节点');
+      const body = await readJson(req);
+      const combinedTokens = [body.cfApiToken, node.cfApiToken, store.state.settings?.cfApiToken].filter(Boolean).join('\n');
+      const result = await verifyCloudflareDomainAccess({
+        apiToken: combinedTokens,
+        zoneId: body.cfZoneId || node.cfZoneId || '',
+        domain: body.domain || node.domain || ''
+      });
+      if (result.zoneId) {
+        store.transact((st) => {
+          const target = st.nodes.find((n) => n.id === node.id);
+          if (target) {
+            target.cfZoneId = result.zoneId;
+            if (result.recordId) target.cfRecordId = result.recordId;
+          }
+        });
+      }
+      return sendJson(res, 200, result);
     }
 
     const clusterNodeSync = route('/api/cluster/nodes/:id/sync', pathname);

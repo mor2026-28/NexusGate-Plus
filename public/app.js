@@ -4,7 +4,7 @@ const BASE_PATH = (window.__NG_BASE_PATH__ && window.__NG_BASE_PATH__ !== '/')
   ? window.__NG_BASE_PATH__.replace(/\/+$/, '')
   : '';
 
-const VALID_PAGES = ['overview', 'cluster', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings'];
+const VALID_PAGES = ['overview', 'cluster', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings', 'guide'];
 
 function getSavedInitialPage() {
   try {
@@ -28,6 +28,7 @@ const state = {
   search: '',
   protoFilter: 'all',
   nodeFilter: 'all',
+  routingNodeFilter: 'all',
   nodes: [],
   failoverLogs: [],
   overview: null,
@@ -381,6 +382,7 @@ async function load(page = state.page, options = {}) {
     } else if (page === 'routing') {
       const data = await api('/api/routing');
       if (page !== state.page || seq !== currentLoadSeq) return;
+      if (Array.isArray(data.nodes) && data.nodes.length) state.nodes = data.nodes;
       state.routing = data.routing || { final: 'direct', rules: [] };
       state.dns = data.dns || { strategy: 'prefer_ipv4' };
       if (Array.isArray(data.inbounds)) {
@@ -417,6 +419,11 @@ async function load(page = state.page, options = {}) {
       state.certificates = data.certificates || [];
       if (data.settings) state.settings = data.settings;
       if (data.inbounds) state.inbounds = data.inbounds;
+    } else if (page === 'guide') {
+      const [cl, st] = await Promise.all([api('/api/cluster/nodes').catch(() => ({})), api('/api/settings').catch(() => ({}))]);
+      if (page !== state.page || seq !== currentLoadSeq) return;
+      if (Array.isArray(cl.nodes)) state.nodes = cl.nodes;
+      if (st.settings) state.settings = st.settings;
     } else if (page === 'settings') {
       const st = await api('/api/settings');
       if (page !== state.page || seq !== currentLoadSeq) return;
@@ -455,7 +462,8 @@ function setPage(page) {
     outbounds: '出站规则 (中转)',
     migrate: '备份迁移',
     certificates: 'SSL 证书与订阅',
-    settings: '面板设置与安全'
+    settings: '面板设置与安全',
+    guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
   $('#breadcrumb').textContent = `NexusGate Plus · v1.0.0 / ${titles[page] || ''}`;
@@ -539,7 +547,7 @@ function renderOverview() {
       <div class="cluster-hub-actions">
         <button class="primary" data-action="jump-cluster">❖ 集群与容灾编排</button>
         <button data-action="add-cluster-node" data-role="relay">＋ 添加中转机</button>
-        <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加落地机</button>
+        <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加落地机 (共享 SS)</button>
         <button data-action="jump-migrate">⇩ 3x-ui 批量归并</button>
       </div>
     </section>
@@ -697,7 +705,7 @@ function renderCluster() {
   const cfConfigured = Boolean(state.settings?.cfApiToken);
 
   const nodeCards = nodes.map((n) => {
-    const roleLabel = n.role === 'exit' ? '落地机 (Exit)' : (n.role === 'standby' ? '热备容灾机 (Standby)' : (n.role === 'hybrid' ? '中转+落地一体' : '中转入口机 (Relay)'));
+    const roleLabel = n.role === 'exit' ? '纯落地机 (Shared SS)' : (n.role === 'standby' ? '热备容灾机 (Standby)' : (n.role === 'hybrid' ? '中转+落地一体' : '中转入口机 (Relay)'));
     const roleBadgeClass = n.role === 'exit' ? 'tls' : (n.role === 'standby' ? 'relay' : '');
     const standbyObj = nodes.find((x) => x.id === n.standbyNodeId);
     const activeFoObj = nodes.find((x) => x.id === n.activeFailoverTo);
@@ -738,6 +746,7 @@ function renderCluster() {
           <button data-action="sync-cluster-node" data-id="${esc(n.id)}">↻ 同步下发配置</button>
           <button data-action="preview-node-config" data-id="${esc(n.id)}">｛｝ 节点配置</button>
           ${!n.isLocal ? `<button data-copy="${esc(n.installCommand || '')}">📋 复制 Agent 命令</button>` : `<button data-action="Filter-node-inbounds" data-node="${esc(n.id)}">◫ 管理节点</button>`}
+          ${(n.role === 'relay' || n.role === 'hybrid') && n.domain ? `<button data-action="test-node-cf" data-id="${esc(n.id)}" title="检测 Cloudflare API Token 是否能自动识别该域名与 Zone ID">🔍 测 CF 解析</button>` : ''}
           ${(n.role === 'relay' || n.role === 'hybrid') && !isFailedOver ? `<button class="warning" data-action="open-failover-modal" data-id="${esc(n.id)}">⚡ 一键容灾切换</button>` : ''}
           ${isFailedOver ? `<button class="success" data-action="trigger-failback" data-id="${esc(n.id)}">✓ 主力恢复回切</button>` : ''}
           <button data-action="edit-cluster-node" data-id="${esc(n.id)}">编辑</button>
@@ -754,12 +763,12 @@ function renderCluster() {
         <h3 style="margin:0;font-size:15px;font-weight:800">如何将多台中转机、落地机与备用机纳入主控？</h3>
         <p class="muted" style="margin:0;font-size:12px;line-height:1.55">
           1. <b>添加中转入口机 (Relay)</b>：每台中转机填写各自的专属域名（如 <code>hk1.vip.com</code>），面板生成订阅时自动匹配对应域名，且可导入该机原有的 <code>3x-ui</code> 备份。<br>
-          2. <b>添加落地机 (Exit)</b>：落地机无需域名，添加后自动在落地机开启 SS 并注册进主控「全局共享落地池」，供多台中转机同时勾选转发。<br>
+          2. <b>添加纯落地机 (Shared SS)</b>：落地机无需域名，添加后自动在落地机开启 SS 并注册进主控「全局共享落地池」，供多台中转机同时勾选转发。<br>
           3. <b>添加热备容灾机 (Standby)</b>：开启实时镜像预热后，主力机故障时一键改 Cloudflare IP 即可 3 秒无损接管。
         </p>
         <div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:4px">
           <button class="primary" data-action="add-cluster-node" data-role="relay">＋ 添加中转入口机</button>
-          <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加落地机</button>
+          <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加落地机 (共享 SS)</button>
           <button class="warning" data-action="add-cluster-node" data-role="standby">＋ 添加热备容灾机</button>
         </div>
       </div>
@@ -833,7 +842,7 @@ function renderCluster() {
           <div style="display:flex;gap:7px;flex-wrap:wrap">
             <button data-action="sync-all-cluster">↻ 全集群一键同步</button>
             <button class="primary" data-action="add-cluster-node" data-role="relay">＋ 添加中转机</button>
-            <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加落地机</button>
+            <button class="success" data-action="add-cluster-node" data-role="exit">＋ 添加落地机 (共享 SS)</button>
             <button class="warning" data-action="add-cluster-node" data-role="standby">＋ 添加热备机</button>
           </div>
         </div>
@@ -878,10 +887,11 @@ function renderCluster() {
           <div class="panel-body stack">
             <div class="form-grid">
               <label class="wide">
-                <span>Cloudflare API Token (需具备 Zone.DNS 编辑权限)</span>
-                <div class="input-row">
-                  <input id="cluster-cf-token" type="password" value="${esc(state.settings?.cfApiToken || '')}" placeholder="粘贴 Cloudflare API Token，留空则切换时提示手动改 IP">
-                  <button class="primary" data-action="save-cluster-cf">保存 CF 配置</button>
+                <span>全局 Cloudflare API Token (支持填入多个不同 CF 账号的 Token，每行一个或逗号分隔；无需填 Zone ID，系统自动按域名识别！)</span>
+                <textarea id="cluster-cf-token" style="min-height:68px" placeholder="粘贴 1 个或多个不同 CF 账号的 API Token（每行一个或逗号分隔）。创建 Token 时选 Edit zone DNS 模板 -> All zones，系统将自动匹配每台中转机域名的 Zone ID！">${esc(state.settings?.cfApiToken || '')}</textarea>
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-top:4px">
+                  <small class="muted">不清楚如何获取？点击左侧栏 <a href="#guide" data-action="jump-guide" style="color:var(--primary);font-weight:700">📖《容灾与集群教程》</a> 查看图文步骤</small>
+                  <button class="primary" data-action="save-cluster-cf">保存 CF Token 配置</button>
                 </div>
               </label>
             </div>
@@ -1256,21 +1266,59 @@ function renderInbounds() {
   `;
 }
 
+function resolveRuleOwnerNodeId(rule) {
+  if (rule.nodeId && rule.nodeId !== 'all') return rule.nodeId;
+  if (Array.isArray(rule.inbound) && rule.inbound.length > 0) {
+    for (const tag of rule.inbound) {
+      const matched = (state.inbounds || []).find((i) => i.tag === tag);
+      if (matched) return matched.nodeId || 'node_local';
+    }
+  }
+  return 'global';
+}
+
 function renderRouting() {
-  const rules = (state.routing.rules || []).filter((r) => r.action !== 'sniff');
+  const allRules = (state.routing.rules || []).filter((r) => r.action !== 'sniff');
+  const rnf = state.routingNodeFilter || 'all';
+  const nodes = state.nodes && state.nodes.length ? state.nodes : [{ id: 'node_local', name: '主控本机 (Local Master)', role: 'relay', domain: state.settings?.webDomain || '' }];
+  const relayServers = nodes.filter((n) => n.role !== 'standby');
+
+  const rules = allRules.filter((r) => {
+    if (rnf === 'all') return true;
+    const ownerId = resolveRuleOwnerNodeId(r);
+    if (rnf === 'global') return ownerId === 'global';
+    return ownerId === rnf;
+  });
+
+  const globalRulesCount = allRules.filter((r) => resolveRuleOwnerNodeId(r) === 'global').length;
+
   const outboundOpts = state.outbounds
     .map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, state.routing.final)}>${esc(o.tag)}${o.server ? ` (${o.server}:${o.port})` : ''}</option>`)
     .join('');
 
-  const quickInboundOpts = state.inbounds
-    .map((i) => `<option value="${esc(i.tag)}">${esc(i.tag)} (${esc(i.remark)} :${i.port})</option>`)
+  const candidateInbounds = (rnf !== 'all' && rnf !== 'global')
+    ? state.inbounds.filter((i) => (i.nodeId || 'node_local') === rnf)
+    : state.inbounds;
+
+  const quickInboundOpts = candidateInbounds
+    .map((i) => {
+      const nObj = nodes.find((n) => n.id === (i.nodeId || 'node_local'));
+      const prefix = nObj ? `[${nObj.name.replace(/\s*\(Local Master\)/, '')}] ` : '';
+      return `<option value="${esc(i.tag)}">${esc(prefix)}${esc(i.tag)} (${esc(i.remark)} :${i.port})</option>`;
+    })
     .join('');
   const quickOutboundOpts = state.outbounds
     .filter((o) => o.tag !== 'block')
-    .map((o) => `<option value="${esc(o.tag)}">${esc(o.tag)}${o.server ? ` (${o.server}:${o.port})` : ` (${o.remark})`}</option>`)
+    .map((o) => `<option value="${esc(o.tag)}">${esc(o.tag)}${o.server ? ` (${o.server}:${o.port} · ${o.remark || ''})` : ` (${o.remark})`}</option>`)
     .join('');
 
   const rows = rules.map((r, idx) => {
+    const ownerId = resolveRuleOwnerNodeId(r);
+    const ownerNode = nodes.find((n) => n.id === ownerId);
+    const ownerBadge = ownerId === 'global'
+      ? '<span class="tag tls">🌐 全局通用规则</span>'
+      : `<span class="tag">🖥 ${esc(ownerNode ? ownerNode.name.replace(/\s*\(Local Master\)/, '') : ownerId)}${ownerNode?.domain ? ` (${esc(ownerNode.domain)})` : ''}</span>`;
+
     const srcIp = (r.source_ip_cidr || []).join(', ');
     const srcPort = (r.source_port || []).join(', ');
     const l4 = r.network ? r.network.toUpperCase() : '';
@@ -1296,6 +1344,7 @@ function renderRouting() {
     return `
       <tr>
         <td><strong>⇅ ${idx + 1}</strong></td>
+        <td>${ownerBadge}</td>
         <td><small>${esc(srcIp)}</small></td>
         <td><small>${esc(srcPort)}</small></td>
         <td><small>${esc(l4)}</small></td>
@@ -1341,11 +1390,22 @@ function renderRouting() {
       </div>
     </div>
 
+    <div class="node-filter-bar">
+      <span style="font-size:12px;font-weight:750;color:var(--muted);margin-right:4px">🖥 按中转服务器区分路由规则 (多机分栏管理):</span>
+      <button class="filter-pill ${rnf === 'all' ? 'active' : ''}" data-action="filter-routing-node" data-node="all">全部规则 (${allRules.length})</button>
+      <button class="filter-pill ${rnf === 'global' ? 'active' : ''}" data-action="filter-routing-node" data-node="global">🌐 全局通用规则 (${globalRulesCount})</button>
+      ${relayServers.map((n) => {
+        const cnt = allRules.filter((r) => resolveRuleOwnerNodeId(r) === n.id).length;
+        const rTag = n.role === 'exit' ? '[落地]' : '[中转]';
+        return `<button class="filter-pill ${rnf === n.id ? 'active' : ''}" data-action="filter-routing-node" data-node="${esc(n.id)}">${rTag} ${esc(n.name)}${n.domain ? ` (${esc(n.domain)})` : ''} (${cnt})</button>`;
+      }).join('')}
+    </div>
+
     <section class="panel">
       <div class="panel-head">
         <div>
-          <h2>快速添加入站 ➔ 出站一对一转发规则</h2>
-          <p>选择本机入站节点标签并指定转发至目标出站节点，点击右侧按钮即可一键绑定生效</p>
+          <h2>快速添加入站 ➔ 出站一对一转发规则 ${rnf !== 'all' && rnf !== 'global' ? `(当前筛选: ${esc(nodes.find((n) => n.id === rnf)?.name || '')})` : ''}</h2>
+          <p>选择入站节点标签并指定转发至目标共享落地或自定义出站节点，点击右侧按钮即可一键绑定生效</p>
         </div>
       </div>
       <div class="panel-body">
@@ -1353,7 +1413,7 @@ function renderRouting() {
           <label>
             选择入站标签 (Inbound Tag)
             <select id="quick-relay-inbound">
-              ${quickInboundOpts || '<option value="">— 请先在【入站节点管理】创建入站 —</option>'}
+              ${quickInboundOpts || '<option value="">— 当前所选服务器下暂无入站节点，请先在【入站节点管理】创建 —</option>'}
             </select>
           </label>
           <label>
@@ -1369,13 +1429,14 @@ function renderRouting() {
 
     <section class="panel">
       <div class="panel-head">
-        <div><h2>路由规则列表 (共 ${rules.length} 条)</h2><p>按从上往下顺序匹配，入站与出站绑定支持双向自动同步</p></div>
+        <div><h2>路由规则列表 (当前显示 ${rules.length} 条 / 总计 ${allRules.length} 条)</h2><p>支持按上方中转服务器分栏查看与修改；每台中转机的专属转发规则仅下发至该中转机，互不干扰</p></div>
       </div>
       <div class="table-wrap">
         <table class="xui-routing-table">
           <thead>
             <tr>
-              <th rowspan="2" style="width:65px">#</th>
+              <th rowspan="2" style="width:55px">#</th>
+              <th rowspan="2">所属服务器</th>
               <th colspan="2" style="text-align:center;border-bottom:1px solid var(--line)">来源</th>
               <th colspan="2" style="text-align:center;border-bottom:1px solid var(--line)">网络</th>
               <th colspan="3" style="text-align:center;border-bottom:1px solid var(--line)">目标地址</th>
@@ -1396,7 +1457,7 @@ function renderRouting() {
             </tr>
           </thead>
           <tbody>
-            ${rows || '<tr><td colspan="12"><div class="empty"><b>暂无路由规则</b><span>点击左上方“＋ 添加路由规则”或使用上方快速绑定功能</span></div></td></tr>'}
+            ${rows || '<tr><td colspan="13"><div class="empty"><b>当前筛选条件下暂无路由规则</b><span>可切换上方中转服务器标签，或点击“＋ 添加路由规则”</span></div></td></tr>'}
           </tbody>
         </table>
       </div>
@@ -1941,6 +2002,146 @@ function renderSettings() {
   `;
 }
 
+
+function renderGuide() {
+  const nodes = state.nodes && state.nodes.length ? state.nodes : [{ id: 'node_local', name: '主控本机 (Local Master)', role: 'relay', host: state.settings?.publicIPv4 || '127.0.0.1', domain: state.settings?.webDomain || '' }];
+  const relayNodes = nodes.filter((n) => n.role === 'relay' || n.role === 'hybrid');
+
+  return `
+    <section class="cluster-hub-banner">
+      <div class="cluster-hub-left">
+        <div class="cluster-hub-title">
+          <span class="tag">实战操作手册</span>
+          <span>NexusGate Plus 多中转 + 共享落地 + 多 CF 账号秒级容灾完整指南</span>
+        </div>
+        <p class="cluster-hub-desc">
+          本页详细解答：如何把多台不同域名的中转机与无域名落地机集中到一个主控面板、如何获取并配置 Cloudflare API Token（含多个不同 CF 账号 / 多个域名的全自动识别原理）、以及如何测试验证 3 秒容灾漂移。
+        </p>
+      </div>
+      <div class="cluster-hub-actions">
+        <button class="primary" data-action="jump-cluster">❖ 前往集群与容灾工作台</button>
+        <button data-action="jump-migrate">⇩ 前往 3x-ui 备份归并</button>
+      </div>
+    </section>
+
+    <section class="grid-2">
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>一、Cloudflare API Token 与 Zone ID 保姆级配置教程</h2>
+            <p>配置一次即可实现：主力中转机故障时，系统自动把域名 A 记录 IP 切换至备用容灾机 IP</p>
+          </div>
+          <span class="tag tls">核心必读</span>
+        </div>
+        <div class="panel-body stack" style="font-size:13px;line-height:1.65">
+          <div class="notice">
+            <b>💡 核心问题解答：我有好几个不同的域名，甚至分散在几个不同的 Cloudflare 账号里，单填一个 Zone ID 能自动切换吗？</b><br>
+            <b>答：完全不需要手动填 Zone ID（强烈建议将 Zone ID 留空）！原因如下：</b><br>
+            1. <b>什么是 Zone ID？</b> 在 Cloudflare 中，每个根域名（如 <code>vponlive.com</code>、<code>abc.com</code>）各自拥有一个独立的 Zone ID。如果你硬填了某一个域名的 Zone ID，它就只能管那一个域名。<br>
+            2. <b>为什么留空 Zone ID 就能全自动切换所有域名？</b> 只要你在创建 CF API Token 时授权了 <b>All zones (所有区域)</b>，当你将 Zone ID 留空时，NexusGate Plus 会根据每台中转机填写的「专属域名（如 <code>cs.vponlive.com</code>、<code>jp1.abc.com</code>）」<b>自动向 Cloudflare API 查询匹配该域名的 Zone ID 与 A 记录 ID</b>，自动完成切换！<br>
+            3. <b>如果你有多个不同的 Cloudflare 账号怎么办？</b><br>
+            • <b>方式 A（全局多 Token 自动识别）</b>：在《中转与落地集群》右侧的「全局 Cloudflare API Token」输入框中，<b>把你名下多个 CF 账号的 Token 全部粘贴进去（每行一个 Token）</b>！切换任意域名时，系统会自动遍历所有 Token 找到该域名所属的 CF 账号并修改解析！<br>
+            • <b>方式 B（单机独立 Token）</b>：在「编辑中转机」弹窗中，直接将该中转机所属 CF 账号的 Token 填在「该中转机专属 CF API Token」框内即可。
+          </div>
+
+          <div style="padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft)">
+            <b>📋 在 Cloudflare 后台获取 API Token 的 4 步具体操作：</b>
+            <ol style="margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
+              <li>登录 <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener" style="color:var(--primary);font-weight:700">Cloudflare 控制台 (My Profile ➔ API Tokens)</a>，点击蓝色的 <b>Create Token (创建令牌)</b>。</li>
+              <li>在模板列表第一行找到 <b>Edit zone DNS (编辑区域 DNS)</b>，点击右侧的 <b>Use template (使用模板)</b>。</li>
+              <li>
+                核对两项关键设置：<br>
+                • <b>Permissions (权限)</b>：保持默认 <code>Zone</code> — <code>DNS</code> — <code>Edit (编辑)</code>；<br>
+                • <b>Zone Resources (区域资源)</b>：选择 <code>Include (包含)</code> ➔ <b><code>All zones (所有区域)</code></b>（这样该 CF 账号下的全部域名都能自动识别切换，无需查 Zone ID！）。
+              </li>
+              <li>拉到底部点击 <b>Continue to summary</b> ➔ <b>Create Token</b>，复制生成的 Token 字符串（形如 <code>aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890</code>），粘贴到本面板的 CF Token 框中保存即可！</li>
+            </ol>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>二、如何测试验证容灾切换与回切？（4 步实战演练）</h2>
+            <p>无需等机器真的宕机，平时即可在面板上一键验证 CF 自动换 IP 与备用机接管</p>
+          </div>
+          <span class="tag relay">秒级容灾演练</span>
+        </div>
+        <div class="panel-body stack" style="font-size:13px;line-height:1.65">
+          <div style="padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft)">
+            <b>⚡ 容灾热备完整配置与测试 4 步曲：</b>
+            <ol style="margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:8px">
+              <li>
+                <b>第 1 步：准备一台备用机并挂上 Agent</b><br>
+                在《中转与落地集群》点击「<b>＋ 添加热备机</b>」，填入备用 VPS 的公网 IP（无需域名）。添加后点击卡片上的「<b>📋 复制 Agent 命令</b>」到备用机 SSH 执行（10 秒装完）。
+              </li>
+              <li>
+                <b>第 2 步：在主力中转机上绑定备用机并开启「实时镜像预热」</b><br>
+                点击主力中转机卡片的「<b>编辑</b>」，确认已填写「中转机专属域名（如 <code>cs.vponlive.com</code>）」，在「绑定备用容灾机」下拉框选择刚添加的热备机，并勾选「<b>开启实时热备镜像预热 (Mirror Standby)</b>」。保存后，主控会将主力机的全部节点与 SSL 证书实时同步到备用机预热！
+              </li>
+              <li>
+                <b>第 3 步：点击「🔍 测 CF 解析」验证 API 权限</b><br>
+                在中转机卡片上点击「<b>🔍 测 CF 解析</b>」按钮，系统会立即调用 Cloudflare API 验证你的 Token 是否能找到该域名，并弹窗显示自动匹配到的 <code>Zone ID</code> 与当前 A 记录 IP。
+              </li>
+              <li>
+                <b>第 4 步：点击「⚡ 一键容灾切换」与「✓ 主力恢复回切」实测</b><br>
+                • 点击中转机卡片的「<b>⚡ 一键容灾切换</b>」➔ 确认后，备用机瞬间接管所有端口与证书，且 Cloudflare 后台该域名的 A 记录 IP 自动变成备用机 IP（客户无需更新订阅，连接不断）！<br>
+                • 演练完毕后，点击卡片上的绿色「<b>✓ 主力恢复回切</b>」按钮，Cloudflare 解析 IP 立即自动切回主力机原 IP！
+              </li>
+            </ol>
+          </div>
+
+          <div class="notice warning">
+            <b>🔍 在线快速检测你的中转机 Cloudflare DNS 连通性：</b>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
+              ${relayNodes.map((rn) => `
+                <button class="primary" data-action="test-node-cf" data-id="${esc(rn.id)}">
+                  🔍 检测 [${esc(rn.name)}] (${esc(rn.domain || '未绑域名')})
+                </button>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>三、多中转机 + 共享落地机 + 多台 3x-ui 无损迁移标准工作流</h2>
+          <p>如何在同一个面板里管理十几台中转机、复用落地机并保持完全隔离</p>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="grid-3">
+          <div class="gauge-card">
+            <b style="font-size:13.5px;color:var(--primary)">1. 添加落地机 (自动开启共享 SS) 与中转机</b>
+            <p class="muted" style="margin:6px 0 0;font-size:12px;line-height:1.6">
+              • 添加<b>落地机 (Exit)</b> 时：无需填域名，保存后系统自动在该落地机开启 Shadowsocks 并注册进主控「全局共享落地池」；你也可以在《入站节点管理》选择该落地机手动搭建更多节点。<br>
+              • 添加<b>中转机 (Relay)</b> 时：每台中转机填写各自的独立域名（如 <code>hk1.a.com</code>、<code>jp1.b.com</code>），生成订阅时自动按节点所属中转机匹配域名。
+            </p>
+          </div>
+          <div class="gauge-card">
+            <b style="font-size:13.5px;color:var(--success)">2. 搭建入站节点与按中转机分栏管理路由</b>
+            <p class="muted" style="margin:6px 0 0;font-size:12px;line-height:1.6">
+              • 在《入站节点管理》点击「＋ 添加入站」时，弹窗顶部可自由选择<b>部署至哪台中转机或落地机</b>，并可直接勾选要转发的共享落地机。<br>
+              • 在《入站节点管理》和《路由规则 (转发)》顶部均有<b>按中转服务器分栏筛选条</b>，哪怕有十几台中转机，点一下对应机器标签即可单独查看和修改该机的节点与转发规则！
+            </p>
+          </div>
+          <div class="gauge-card">
+            <b style="font-size:13.5px;color:#7c3aed">3. 多台 3x-ui / X-Panel / NexusGate 无损归并</b>
+            <p class="muted" style="margin:6px 0 0;font-size:12px;line-height:1.6">
+              • 在《备份迁移》选择目标中转机（或选「自动新建中转机」），上传原机器的 <code>x-ui.db</code>、<code>3xui_backup.tar.gz</code> 或 <code>nexusgate-backup.json</code>。<br>
+              • 不同中转机哪怕都有 <code>443</code> 等相同端口也会自动按机器隔离，多台机器共用的相同落地 SS 节点（相同 IP:端口）会自动去重合并，客户零感知！
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function render() {
   updateSidebarBadges();
   const views = {
@@ -1951,7 +2152,8 @@ function render() {
     outbounds: renderOutbounds,
     migrate: renderMigrate,
     certificates: renderCertificates,
-    settings: renderSettings
+    settings: renderSettings,
+    guide: renderGuide
   };
   const contentEl = $('#content');
   if (!contentEl) return;
@@ -2112,6 +2314,12 @@ function openClientDetailModal(inbound, client = null) {
 }
 
 async function openInboundModal(existing = null, preset = '') {
+  if (!state.nodes || !state.nodes.length) {
+    try {
+      const cl = await api('/api/cluster/nodes');
+      if (Array.isArray(cl.nodes)) state.nodes = cl.nodes;
+    } catch { /* ignore */ }
+  }
   const realCert = getActiveCertObject();
   const defTlsDomain = realCert?.domain || state.settings?.webDomain || state.defaultSettings?.defaultTlsDomain || 'www.apple.com';
   const defCertFile = realCert?.certPath || state.defaultSettings?.defaultCertFile || state.settings?.webCertFile || '';
@@ -2218,6 +2426,18 @@ async function openInboundModal(existing = null, preset = '') {
     existing ? `${existing.remark} (:${existing.port})` : '配置入站协议、IP/设备限制、到期时间、流量重置与中转出站',
     `
     <form id="inbound-form" class="form-grid" data-id="${esc(existing?.id || '')}">
+      <label class="wide" style="padding:11px 14px;border-radius:10px;background:var(--primary-soft);border:1px solid color-mix(in srgb,var(--primary) 30%,var(--line))">
+        <span style="color:var(--primary);font-weight:800">🖥 部署至目标服务器 (选择要在哪台中转机或落地机上创建此节点)</span>
+        <select name="nodeId" id="inb-node-select" style="margin-top:4px;font-weight:700">
+          ${(state.nodes && state.nodes.length ? state.nodes : [{ id: 'node_local', name: '主控本机 (Local Master)', role: 'relay', host: state.settings?.publicIPv4 || '127.0.0.1', domain: state.settings?.webDomain || '' }]).map((n) => {
+            const rLabel = n.role === 'exit' ? '【落地机】' : (n.role === 'standby' ? '【热备机】' : '【中转机】');
+            const hostDesc = n.domain ? `专属域名: ${n.domain} (${n.host || ''})` : `IP: ${n.host || '127.0.0.1'}${n.role === 'exit' ? ' · 所建节点自动注册进共享出站池' : ''}`;
+            const defNodeId = existing ? (item.nodeId || 'node_local') : (state.nodeFilter && state.nodeFilter !== 'all' ? state.nodeFilter : 'node_local');
+            return `<option value="${esc(n.id)}" data-domain="${esc(n.domain || '')}" data-role="${esc(n.role || 'relay')}"${selected(n.id, defNodeId)}>${rLabel} ${esc(n.name)} — ${esc(hostDesc)}</option>`;
+          }).join('')}
+        </select>
+        <small style="color:var(--muted);margin-top:2px">选择中转机时，客户端订阅与连接地址将自动匹配该中转机的专属域名；选择落地机时，创建后将自动加入出站列表供所有中转机转发。</small>
+      </label>
       <label>
         节点备注名称
         <input name="remark" value="${esc(item.remark)}" placeholder="如 VLESS-Reality" required>
@@ -3117,30 +3337,42 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
     isp: '',
     standbyNodeId: '',
     mirrorStandby: true,
+    cfApiToken: '',
     cfZoneId: '',
-    cfRecordName: ''
+    cfRecordName: '',
+    exitConfig: {
+      enabled: defaultRole === 'exit' || defaultRole === 'hybrid',
+      port: 28388,
+      method: '2022-blake3-aes-128-gcm',
+      password: ''
+    }
   };
-  const standbyChoices = (state.nodes || [])
-    .filter((x) => x.id !== n.id && !x.isLocal)
-    .map((x) => `<option value="${esc(x.id)}"${selected(x.id, n.standbyNodeId)}>${esc(x.name)} (${esc(x.host)})</option>`)
+  const sortedCandidates = [...(state.nodes || [])]
+    .filter((x) => x.id !== n.id && !x.isLocal && x.role !== 'exit')
+    .sort((a, b) => (a.role === 'standby' ? -1 : 1) - (b.role === 'standby' ? -1 : 1));
+  const standbyChoices = sortedCandidates
+    .map((x) => {
+      const rBadge = x.role === 'standby' ? '【热备容灾机·推荐】' : '【中转机兼备机】';
+      return `<option value="${esc(x.id)}"${selected(x.id, n.standbyNodeId)}>${rBadge} ${esc(x.name)} (${esc(x.host)})</option>`;
+    })
     .join('');
 
   openModal(
     existing ? '编辑集群服务器节点' : '添加集群服务器 (中转机 / 落地机 / 热备容灾机)',
-    existing ? n.name : '添加后只需在《入站节点管理》选择该服务器即可自由搭建任意协议节点',
+    existing ? n.name : '一主控统管：中转机绑定独立域名，落地机无需域名自动开启 SS 并加入全局共享落地池',
     `
     <form id="cluster-node-form" class="form-grid" data-id="${esc(existing?.id || '')}">
       <label>
         服务器备注名称
-        <input name="name" value="${esc(n.name)}" placeholder="例如：香港 CMI 中转 01 / 美国落地 01" required>
+        <input name="name" value="${esc(n.name)}" placeholder="例如：香港 CMI 中转 01 / 美国原生落地 01" required>
       </label>
       <label>
         服务器角色类型
         <select name="role" id="cluster-role-select">
           <option value="relay"${selected('relay', n.role)}>中转入口机 (Relay · 绑定各自独立域名承载客户)</option>
-          <option value="exit"${selected('exit', n.role)}>落地机 (Exit · 无域名纯IP，所建节点自动供中转机转发)</option>
+          <option value="exit"${selected('exit', n.role)}>纯落地机 (Exit · 免域名纯IP，自动开启SS加入全局共享落地池)</option>
           <option value="hybrid"${selected('hybrid', n.role)}>中转 + 落地一体机 (Hybrid)</option>
-          <option value="standby"${selected('standby', n.role)}>热备容灾机 (Standby · 主力故障秒级接管)</option>
+          <option value="standby"${selected('standby', n.role)}>热备容灾机 (Standby · 主力中转故障时秒级接管)</option>
         </select>
       </label>
       <label>
@@ -3152,21 +3384,45 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
         <input name="agentPort" type="number" value="${esc(n.agentPort || 19090)}" required>
       </label>
       <label class="wide">
-        中转机专属域名 (中转机请填写各自绑定的域名，客户端订阅将自动使用该域名；落地机无域名留空即可)
-        <input name="domain" value="${esc(n.domain || '')}" placeholder="例如：hk1.yourdomain.com (落地机留空)">
+        中转机专属域名 (中转机请填写各自绑定的域名，客户端订阅自动匹配该域名；落地机与热备机无域名留空即可)
+        <input name="domain" value="${esc(n.domain || '')}" placeholder="例如：cs.vponlive.com (落地机免填)">
       </label>
 
-      <div class="section-title">秒级容灾热备与 Cloudflare DNS 自动切换 (中转机可选配)</div>
+      <div class="section-title">落地机自动开启共享 SS 配置 (当角色为「纯落地机」或「一体机」时自动生效，供多台中转机同时勾选转发)</div>
+      <label>
+        落地 Shadowsocks 监听端口
+        <input name="exitPort" type="number" value="${esc(n.exitConfig?.port || 28388)}" placeholder="28388">
+      </label>
+      <label>
+        落地 Shadowsocks 加密方式
+        <select name="exitMethod">
+          <option value="2022-blake3-aes-128-gcm"${selected('2022-blake3-aes-128-gcm', n.exitConfig?.method)}>2022-blake3-aes-128-gcm (极速推荐)</option>
+          <option value="2022-blake3-aes-256-gcm"${selected('2022-blake3-aes-256-gcm', n.exitConfig?.method)}>2022-blake3-aes-256-gcm</option>
+          <option value="aes-256-gcm"${selected('aes-256-gcm', n.exitConfig?.method)}>aes-256-gcm</option>
+          <option value="aes-128-gcm"${selected('aes-128-gcm', n.exitConfig?.method)}>aes-128-gcm</option>
+          <option value="chacha20-ietf-poly1305"${selected('chacha20-ietf-poly1305', n.exitConfig?.method)}>chacha20-ietf-poly1305</option>
+        </select>
+      </label>
+      <label class="wide">
+        落地 Shadowsocks 密码 (选填，留空将自动生成高强度密钥并同步给所有中转机；此外你也可以在《入站节点管理》继续为该落地机添加任意额外节点)
+        <input name="exitPassword" value="${esc(n.exitConfig?.password || '')}" placeholder="留空自动生成标准高强度 SS 密钥">
+      </label>
+
+      <div class="section-title">秒级容灾热备与 Cloudflare DNS 自动换 IP (支持多个不同 CF 账号与多域名自动识别)</div>
       <label>
         绑定备用容灾机 (Standby Node)
         <select name="standbyNodeId">
-          <option value="">暂不绑定备用机</option>
+          <option value="">暂不绑定备用机 (请先添加一台角色为「热备容灾机」的节点)</option>
           ${standbyChoices}
         </select>
       </label>
       <label>
-        Cloudflare Zone ID (选填，留空自动按域名识别)
-        <input name="cfZoneId" value="${esc(n.cfZoneId || '')}" placeholder="留空自动查询">
+        该机独立 Cloudflare API Token (选填 · 多 CF 账号专用)
+        <input name="cfApiToken" type="password" value="${esc(n.cfApiToken || '')}" placeholder="留空则默认使用集群页面的全局 CF Token">
+      </label>
+      <label class="wide">
+        Cloudflare Zone ID (强烈建议留空！系统会根据上方填写的「中转机专属域名」自动查询匹配的 Zone ID，多个域名无需手动查填)
+        <input name="cfZoneId" value="${esc(n.cfZoneId || '')}" placeholder="留空即可全自动按域名识别 Zone ID">
       </label>
       <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
         <input type="checkbox" name="mirrorStandby" style="width:16px;min-height:16px" ${n.mirrorStandby !== false ? 'checked' : ''}>
@@ -3265,6 +3521,13 @@ function openRuleModal(existing = null) {
     existing ? (r.remark || `规则 -> ${r.outbound}`) : '配置入站转发映射或域名/IP分流规则',
     `
     <form id="rule-form" class="form-grid" data-id="${esc(existing?.id || '')}">
+      <label class="wide">
+        适用服务器范围 (可将此分流/转发规则限定在某一台特定中转机，或设为全部中转机通用)
+        <select name="nodeId" id="rule-node-select">
+          <option value=""${selected('', r.nodeId || (state.routingNodeFilter !== 'all' && state.routingNodeFilter !== 'global' ? state.routingNodeFilter : ''))}>🌐 全部中转机通用 (或按所选入站标签自动归属对应中转机)</option>
+          ${(state.nodes || []).filter((n) => n.role !== 'standby').map((n) => `<option value="${esc(n.id)}"${selected(n.id, r.nodeId || (state.routingNodeFilter !== 'all' && state.routingNodeFilter !== 'global' ? state.routingNodeFilter : ''))}>🖥 仅在 [${esc(n.name)}${n.domain ? ` · ${esc(n.domain)}` : ''}] 上生效</option>`).join('')}
+        </select>
+      </label>
       <label class="wide">
         选择要转发的入站标签 (Inbound Tags · 可多选)
         <div class="rule-inbound-checks">
@@ -3431,6 +3694,22 @@ document.addEventListener('click', async (e) => {
   try {
     if (action === 'jump-migrate') { setPage('migrate'); }
     else if (action === 'jump-cluster') { setPage('cluster'); }
+    else if (action === 'jump-guide') { setPage('guide'); }
+    else if (action === 'filter-routing-node') {
+      state.routingNodeFilter = actEl.dataset.node || 'all';
+      render();
+    }
+    else if (action === 'test-node-cf') {
+      const nodeId = actEl.dataset.id;
+      const cfApiToken = $('#cluster-cf-token')?.value.trim() || state.settings?.cfApiToken || '';
+      toast('🔍 正在连接 Cloudflare API 检测域名与 Zone ID...');
+      const res = await api(`/api/cluster/nodes/${encodeURIComponent(nodeId)}/test-cf`, {
+        method: 'POST',
+        body: JSON.stringify({ cfApiToken })
+      });
+      toast(res.message || '✅ Cloudflare DNS API 验证成功！', res.ok === false);
+      load(state.page, { silent: true });
+    }
     else if (action === 'add-cluster-node') {
       openClusterNodeModal(null, actEl.dataset.role || 'relay');
     }
@@ -3851,9 +4130,10 @@ document.addEventListener('click', async (e) => {
       const customOut = (selOut && selOut !== 'direct')
         ? selOut
         : (state.outbounds.find((o) => !o.builtin)?.tag || 'direct');
+      const scopedNodeId = (state.routingNodeFilter && state.routingNodeFilter !== 'all' && state.routingNodeFilter !== 'global') ? state.routingNodeFilter : '';
       await api('/api/routing/presets', {
         method: 'POST',
-        body: JSON.stringify({ preset, outbound: customOut })
+        body: JSON.stringify({ preset, outbound: customOut, nodeId: scopedNodeId })
       });
       toast(`已应用分流预设 (${preset})`);
       load('routing');

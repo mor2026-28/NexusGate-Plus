@@ -1437,7 +1437,7 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
     return el;
   };
 
-  const navPages = ['overview', 'cluster', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings'];
+  const navPages = ['overview', 'cluster', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings', 'guide'];
   const navButtons = navPages.map((p, i) => makeEl('button', `nav-${p}`, { className: i === 0 ? 'active' : '', dataset: { page: p } }));
   const elementsById = new Map([
     ['login', makeEl('div', 'login', { className: 'login-shell hidden' })],
@@ -1574,7 +1574,8 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
     outbounds: '出站规则 (中转)',
     migrate: '备份迁移',
     certificates: 'SSL 证书与订阅',
-    settings: '面板设置与安全'
+    settings: '面板设置与安全',
+    guide: '容灾与集群教程'
   };
 
   for (const page of navPages) {
@@ -1603,12 +1604,15 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
     await clickHandler({ target: addExitBtn });
   }
   assert.equal(elementsById.get('modal').open, true, 'Clicking add-cluster-node (exit) must open modal');
-  assert.ok(!elementsById.get('modal-body').innerHTML.includes('exitPort'), 'Exit server modal must NOT contain forced exitPort SS field');
+  assert.ok(elementsById.get('modal-body').innerHTML.includes('exitPort'), 'Exit server modal must include automatic Shared SS configuration (exitPort)');
+  assert.ok(elementsById.get('modal-body').innerHTML.includes('cfApiToken'), 'Cluster node modal must include per-node Cloudflare API Token field');
   sandbox.closeModal();
 
   // Also test opening Inbound, Outbound, Rule, and Aggregate QR modals in the VM without any runtime errors
   await sandbox.openInboundModal();
   assert.equal(elementsById.get('modal').open, true);
+  assert.ok(elementsById.get('modal-body').innerHTML.includes('id="inb-node-select"'), 'Inbound creation modal must render server selector (#inb-node-select) at the top');
+  assert.ok(elementsById.get('modal-body').innerHTML.includes('部署至目标服务器'), 'Inbound creation modal must show target server selection label');
   sandbox.closeModal();
   assert.equal(elementsById.get('modal').open, false);
 
@@ -2155,7 +2159,7 @@ test('21. NexusGate Plus v1.0.0 Cluster Architecture: Multi-Relay Independent Do
 
 
 test('22. End-to-End Multi-Relay & Exit Simulation: Create Nodes on Exit Servers, Multi-Backup (3x-ui + X-Panel + NexusGate) Isolation across Domains/Ports/Certs, and Frontend Modal E2E', async () => {
-  // 1. Add a pure Exit server WITHOUT exitPort -> verify NO dummy 28388 SS outbound is force-created
+  // 1. Add an Exit server -> verify it automatically enables Shared SS on the Exit machine and registers it in Global Outbound Pool
   const exRes = await req('/SecPath16Chars99/api/cluster/nodes', {
     method: 'POST',
     body: JSON.stringify({
@@ -2166,8 +2170,11 @@ test('22. End-to-End Multi-Relay & Exit Simulation: Create Nodes on Exit Servers
   });
   assert.equal(exRes.status, 201);
   const ukExitNode = exRes.json.node;
-  const dummyOut = exRes.json.outbounds.find((o) => o.exitNodeId === ukExitNode.id && !o.linkedInboundId);
-  assert.equal(dummyOut, undefined, 'Adding an Exit server must NOT force-create a dummy SS outbound before the user builds a node on it');
+  assert.equal(ukExitNode.exitConfig.enabled, true, 'Exit server must have exitConfig.enabled = true by default');
+  const sharedSsOut = exRes.json.outbounds.find((o) => o.exitNodeId === ukExitNode.id && !o.linkedInboundId);
+  assert.ok(sharedSsOut, 'Adding an Exit server must automatically register a Shared SS outbound in the global pool');
+  assert.equal(sharedSsOut.server, '185.199.108.55');
+  assert.equal(sharedSsOut.port, 28388);
 
   // 2. Now create an SS-2022 node on `ukExitNode` in Inbounds Management -> verify it automatically appears in Outbounds!
   const createExitInb = await req('/SecPath16Chars99/api/inbounds', {
@@ -2282,4 +2289,46 @@ test('22. End-to-End Multi-Relay & Exit Simulation: Create Nodes on Exit Servers
   });
   assert.equal(switchOutRes.status, 200);
   assert.equal(switchOutRes.json.inbound.outboundTag, autoSyncedOut.tag);
+
+  // 6. Verify per-Relay routing rule scoping (rule.nodeId) & preset scoping so multi-Relay rules never collide
+  const allClusterNodes = (await req('/SecPath16Chars99/api/cluster/nodes')).json.nodes;
+  const sgRelayNode = allClusterNodes.find((n) => n.domain === 'sg1.vip.com');
+  const hkRelayNode = allClusterNodes.find((n) => n.domain === 'hk1.vip.com');
+  assert.ok(sgRelayNode && hkRelayNode, 'Both SG and HK Relay servers must exist');
+
+  const scopedRuleRes = await req('/SecPath16Chars99/api/routing/rules', {
+    method: 'POST',
+    body: JSON.stringify({
+      nodeId: sgRelayNode.id,
+      remark: 'SG中转机专属OpenAI分流',
+      domain_suffix: ['openai.com', 'chatgpt.com'],
+      outbound: sharedSsOut.tag
+    })
+  });
+  assert.equal(scopedRuleRes.status, 201);
+  assert.equal(scopedRuleRes.json.rule.nodeId, sgRelayNode.id);
+
+  // Verify SG Relay compiled config includes this rule, while HK Relay compiled config does NOT!
+  const sgCompiled = (await req(`/SecPath16Chars99/api/cluster/nodes/${sgRelayNode.id}/config`)).json.singboxConfig;
+  const hkCompiled = (await req(`/SecPath16Chars99/api/cluster/nodes/${hkRelayNode.id}/config`)).json.singboxConfig;
+  assert.ok(
+    sgCompiled.route.rules.some((r) => Array.isArray(r.domain_suffix) && r.domain_suffix.includes('openai.com') && r.outbound === sharedSsOut.tag),
+    'SG Relay sing-box config must contain its scoped OpenAI rule'
+  );
+  assert.ok(
+    !hkCompiled.route.rules.some((r) => Array.isArray(r.domain_suffix) && r.domain_suffix.includes('openai.com') && r.outbound === sharedSsOut.tag),
+    'HK Relay sing-box config must NOT receive SG Relay scoped rule'
+  );
+
+  // 7. Verify Multi-Cloudflare Token parser & test-cf endpoint
+  const { parseTokenList } = require('../lib/failover');
+  const tokens = parseTokenList('token_node_override, token_acc_1', 'token_acc_1,\ntoken_acc_2; token_acc_3');
+  assert.deepEqual(tokens, ['token_node_override', 'token_acc_1', 'token_acc_2', 'token_acc_3'], 'parseTokenList must deduplicate and prioritize per-node CF token');
+
+  const testCfRes = await req(`/SecPath16Chars99/api/cluster/nodes/${sgRelayNode.id}/test-cf`, {
+    method: 'POST',
+    body: JSON.stringify({})
+  });
+  assert.equal(testCfRes.status, 200);
+  assert.equal(testCfRes.json.domain, 'sg1.vip.com');
 });
