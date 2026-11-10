@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.0)
+ * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.1)
  * Zero external npm dependencies · < 15 MB RAM footprint
  * Supports Relay Node, Exit Node (SS/SS2022/VMess), and Hot-Standby Failover Node.
  */
@@ -103,13 +103,17 @@ function applySyncedPayload(payload = {}) {
     }
   }
 
-  if (payload.singboxConfig && typeof payload.singboxConfig === 'object') {
+  const nextHash = payload.configHash || '';
+  const metrics = collectNodeMetrics();
+  const needRestart = !nextHash || nextHash !== currentConfigHash || !metrics.sbRunning;
+
+  if (payload.singboxConfig && typeof payload.singboxConfig === 'object' && needRestart) {
     fs.mkdirSync(path.dirname(cfg.configPath), { recursive: true });
     const tmpPath = `${cfg.configPath}.tmp.${process.pid}`;
     fs.writeFileSync(tmpPath, JSON.stringify(payload.singboxConfig, null, 2), { mode: 0o600 });
     fs.renameSync(tmpPath, cfg.configPath);
 
-    // Reload or restart sing-box service
+    // Reload or restart sing-box service only when configHash changed or service stopped
     const sysRestart = spawnSync('systemctl', ['restart', 'nexusgate-singbox.service'], { timeout: 6000 });
     if (sysRestart.status !== 0 && fs.existsSync(cfg.singboxBin)) {
       if (sbChild && !sbChild.killed) {
@@ -225,6 +229,12 @@ if (require.main === module) {
     console.log(`[NexusGate-Agent] Listening on 0.0.0.0:${cfg.port} (Node: ${cfg.nodeId})`);
     sendHeartbeat();
     setInterval(sendHeartbeat, 10000).unref();
+    setInterval(() => {
+      if (connTrafficSeen.size > 2000) connTrafficSeen.clear();
+      if (typeof global.gc === 'function') {
+        try { global.gc(); } catch { /* ignore */ }
+      }
+    }, 60000).unref();
   });
 }
 

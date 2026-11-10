@@ -1590,13 +1590,16 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
     assert.ok(elementsById.get('content').innerHTML.length > 100, `Content for [${page}] must be non-empty`);
   }
 
-  // Test clicking 'add-cluster-node' button in DOM -> must open openClusterNodeModal
+  // Test clicking 'add-cluster-node' button in DOM -> must open openClusterNodeModal with role-specific visibility
   const addRelayBtn = makeEl('button', 'btn-add-relay', { dataset: { action: 'add-cluster-node', role: 'relay' } });
   for (const clickHandler of doc.listeners.click || []) {
     await clickHandler({ target: addRelayBtn });
   }
-  assert.equal(elementsById.get('modal').open, true, 'Clicking add-cluster-node must open modal');
-  assert.ok(elementsById.get('modal-body').innerHTML.includes('cluster-node-form'), 'Cluster node modal must contain #cluster-node-form');
+  assert.equal(elementsById.get('modal').open, true, 'Clicking add-cluster-node (relay) must open modal');
+  const relayModalHtml = elementsById.get('modal-body').innerHTML;
+  assert.ok(relayModalHtml.includes('cluster-node-form'), 'Cluster node modal must contain #cluster-node-form');
+  assert.ok(relayModalHtml.includes('id="cluster-exit-ss-wrap" class="form-grid wide" style="margin:0;display:none"'), 'Relay server modal must HIDE Exit SS section');
+  assert.ok(relayModalHtml.includes('id="cluster-domain-wrap" class="form-grid wide" style="margin:0;"'), 'Relay server modal must SHOW domain section');
   sandbox.closeModal();
 
   const addExitBtn = makeEl('button', 'btn-add-exit', { dataset: { action: 'add-cluster-node', role: 'exit' } });
@@ -1604,8 +1607,17 @@ test('17. Real Frontend DOM Execution E2E Test: Boot public/app.js, Click All 7 
     await clickHandler({ target: addExitBtn });
   }
   assert.equal(elementsById.get('modal').open, true, 'Clicking add-cluster-node (exit) must open modal');
-  assert.ok(elementsById.get('modal-body').innerHTML.includes('exitPort'), 'Exit server modal must include automatic Shared SS configuration (exitPort)');
-  assert.ok(elementsById.get('modal-body').innerHTML.includes('cfApiToken'), 'Cluster node modal must include per-node Cloudflare API Token field');
+  const exitModalHtml = elementsById.get('modal-body').innerHTML;
+  assert.ok(exitModalHtml.includes('id="cluster-exit-ss-wrap" class="form-grid wide" style="margin:0;"'), 'Exit server modal must SHOW Exit SS section');
+  assert.ok(exitModalHtml.includes('id="cluster-domain-wrap" class="form-grid wide" style="margin:0;display:none"'), 'Exit server modal must HIDE domain section');
+  assert.ok(exitModalHtml.includes('id="cluster-failover-cf-wrap" class="form-grid wide" style="margin:0;display:none"'), 'Exit server modal must HIDE CF failover section');
+  sandbox.closeModal();
+
+  // Test openAggregateQrModal per-server filtering
+  sandbox.openAggregateQrModal('node_local');
+  assert.equal(elementsById.get('modal').open, true);
+  assert.ok(elementsById.get('modal-body').innerHTML.includes('filter-agg-qr-node'), 'Aggregate QR modal must render server filter buttons');
+  assert.ok(elementsById.get('modal-body').innerHTML.includes('?node=node_local'), 'Aggregate QR modal filtered by node_local must append ?node=node_local to subscription URL');
   sandbox.closeModal();
 
   // Also test opening Inbound, Outbound, Rule, and Aggregate QR modals in the VM without any runtime errors
@@ -2331,4 +2343,33 @@ test('22. End-to-End Multi-Relay & Exit Simulation: Create Nodes on Exit Servers
   });
   assert.equal(testCfRes.status, 200);
   assert.equal(testCfRes.json.domain, 'sg1.vip.com');
+
+  // 8. Verify Relay server NEVER creates a Shared SS outbound even if exitPort is sent, and non-hex cfZoneId (browser autofill) is stripped
+  const relayNoSsRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: '韩国首尔中转 04',
+      role: 'relay',
+      host: '141.164.55.66',
+      domain: 'kr1.vip.com',
+      exitPort: 28388,
+      cfZoneId: 'ng_syM99sEfpJ' // simulated browser username autofill
+    })
+  });
+  assert.equal(relayNoSsRes.status, 201);
+  assert.equal(relayNoSsRes.json.node.exitConfig.enabled, false, 'Relay role must NEVER enable exitConfig even if exitPort was submitted');
+  assert.equal(relayNoSsRes.json.node.cfZoneId, '', 'Non-hex browser-autofilled cfZoneId must be stripped to empty string');
+  assert.equal(
+    relayNoSsRes.json.outbounds.find((o) => o.exitNodeId === relayNoSsRes.json.node.id),
+    undefined,
+    'Relay node must NEVER register a Shared SS outbound'
+  );
+
+  // 9. Verify per-server aggregate subscription filtering (/sub/:subToken?node=<nodeId>&format=raw)
+  const settingsData = (await req('/SecPath16Chars99/api/settings')).json.settings;
+  const aggToken = settingsData.subToken;
+  const subSgOnly = await req(`/sub/${aggToken}?format=raw&node=${sgRelayNode.id}`);
+  assert.equal(subSgOnly.status, 200);
+  assert.ok(subSgOnly.text.includes('@sg1.vip.com:443'), 'Per-server aggregate subscription for SG must include SG node');
+  assert.ok(!subSgOnly.text.includes('@hk1.vip.com:443'), 'Per-server aggregate subscription for SG must NOT include HK node');
 });

@@ -529,6 +529,10 @@ dialog::backdrop { background: rgba(15, 23, 42, .48); backdrop-filter: blur(4px)
 @media(max-width:960px) {
   .grid-2, .grid-3 { grid-template-columns: 1fr; }
 }
+@media(max-width:960px) {
+  .grid-2, .grid-3, .quick-relay-grid { grid-template-columns: 1fr; }
+  .cluster-grid { grid-template-columns: 1fr; }
+}
 @media(max-width:640px) {
   .main-shell { margin-left: 0; }
   .sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 60; height: 100vh; height: 100dvh; transform: translateX(-105%); transition: transform .22s cubic-bezier(.4, 0, .2, 1); box-shadow: var(--shadow-lg); }
@@ -536,11 +540,22 @@ dialog::backdrop { background: rgba(15, 23, 42, .48); backdrop-filter: blur(4px)
   .sidebar-scrim { position: fixed; z-index: 55; inset: 0; border: 0; background: rgba(15, 23, 42, .45); backdrop-filter: blur(2px); }
   .app-shell.sidebar-open .sidebar-scrim { display: block; }
   .mobile-only { display: grid; }
-  .topbar { height: 54px; padding: 0 12px; gap: 8px; }
-  .title-block h1 { font-size: 15.5px; }
-  .content { padding: 12px 12px 18px; }
-  .metrics, .metrics-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .topbar { height: auto; min-height: 54px; padding: 8px 12px; gap: 8px; flex-wrap: wrap; }
+  .title-block h1 { font-size: 15px; }
+  .title-block .eyebrow { font-size: 10px; }
+  .top-actions { gap: 5px; }
+  .top-actions button { padding: 5px 8px; font-size: 11.5px; min-height: 30px; }
+  .content { padding: 10px 10px 20px; }
+  .metrics, .metrics-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .stat-strip { grid-template-columns: 1fr; gap: 8px; padding: 10px 12px; }
+  .stat-strip-item { border-right: 0; padding-right: 0; border-bottom: 1px dashed var(--line); padding-bottom: 6px; }
+  .stat-strip-item:last-child { border-bottom: 0; padding-bottom: 0; }
+  .qr-wall-grid, .cluster-grid, .rule-inbound-checks, .quick-relay-grid, .detail-summary-3 { grid-template-columns: 1fr; }
   .user-chip { display: none; }
   .form-grid, .node-meta, .detail-grid-2 { grid-template-columns: 1fr; }
   .form-grid .wide, .form-actions, .section-title { grid-column: 1; }
+  dialog { width: calc(100vw - 14px); max-height: 92dvh; border-radius: 12px; }
+  .dialog-shell > header { padding: 12px 14px; }
+  .dialog-shell > div { padding: 12px 14px 16px; max-height: calc(92dvh - 64px); }
+  .node-filter-bar, .quick-bar, .action-bar { padding: 8px 10px; gap: 6px; }
 }

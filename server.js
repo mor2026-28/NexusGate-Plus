@@ -60,7 +60,7 @@ const {
 const { triggerNodeFailover, triggerNodeFailback, updateCloudflareDnsIp, verifyCloudflareDomainAccess } = require('./lib/failover');
 const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -1020,7 +1020,7 @@ async function handleRequest(req, res) {
         const ua = String(req.headers['user-agent'] || '').toLowerCase();
         const fmt = url.searchParams.get('format')
           || (ua.includes('clash') || ua.includes('mihomo') || ua.includes('stash') ? 'clash' : (ua.includes('sing-box') || ua.includes('sfi') ? 'singbox' : 'base64'));
-        const output = formatSubscription(store.state, subMatch.token, fmt, reqHostHeader);
+        const output = formatSubscription(store.state, subMatch.token, fmt, reqHostHeader, url.searchParams.get('node') || '');
         if (!output) {
           res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
           res.end('404 Not Found');
@@ -2160,12 +2160,12 @@ async function handleRequest(req, res) {
           activeFailoverTo: '',
           failoverAt: '',
           cfApiToken: String(body.cfApiToken || '').trim(),
-          cfZoneId: String(body.cfZoneId || '').trim(),
+          cfZoneId: /^[a-f0-9]{32}$/i.test(String(body.cfZoneId || '').trim()) ? String(body.cfZoneId).trim() : '',
           cfRecordId: String(body.cfRecordId || '').trim(),
           cfRecordName: String(body.cfRecordName || domain || '').trim(),
           cfProxied: Boolean(body.cfProxied),
           exitConfig: {
-            enabled: body.exitEnabled !== false && (role === 'exit' || role === 'hybrid' || Boolean(body.exitPort || body.exitConfig?.enabled)),
+            enabled: (role === 'exit' || role === 'hybrid') && body.exitEnabled !== false,
             protocol: 'shadowsocks',
             port: exitPort,
             method: exitMethod,
@@ -2223,14 +2223,17 @@ async function handleRequest(req, res) {
         if (body.standbyNodeId !== undefined) existing.standbyNodeId = String(body.standbyNodeId).trim();
         if (body.mirrorStandby !== undefined) existing.mirrorStandby = Boolean(body.mirrorStandby);
         if (body.cfApiToken !== undefined) existing.cfApiToken = String(body.cfApiToken).trim();
-        if (body.cfZoneId !== undefined) existing.cfZoneId = String(body.cfZoneId).trim();
+        if (body.cfZoneId !== undefined) {
+          const zRaw = String(body.cfZoneId || '').trim();
+          existing.cfZoneId = /^[a-f0-9]{32}$/i.test(zRaw) ? zRaw : '';
+        }
         if (body.cfRecordName !== undefined) existing.cfRecordName = String(body.cfRecordName).trim();
         if (body.cfProxied !== undefined) existing.cfProxied = Boolean(body.cfProxied);
-        if (body.exitPort !== undefined || body.exitMethod !== undefined || body.exitPassword !== undefined || body.exitConfig) {
+        if (body.exitPort !== undefined || body.exitMethod !== undefined || body.exitPassword !== undefined || body.exitConfig || body.role !== undefined) {
           const ec = existing.exitConfig || {};
           const nextMethod = normalizeSsMethod(body.exitMethod || body.exitConfig?.method || ec.method || '2022-blake3-aes-128-gcm');
           existing.exitConfig = {
-            enabled: existing.role === 'exit' || existing.role === 'hybrid' || Boolean(body.exitConfig?.enabled ?? ec.enabled),
+            enabled: existing.role === 'exit' || existing.role === 'hybrid',
             protocol: 'shadowsocks',
             port: Number(body.exitPort || body.exitConfig?.port || ec.port || 28388),
             method: nextMethod,
@@ -2384,7 +2387,9 @@ async function handleRequest(req, res) {
         ...c,
         ...inspectCertificate(c.certPath, c.keyPath)
       }));
+      ensureClusterNodes(store.state);
       return sendJson(res, 200, {
+        nodes: store.state.nodes || [],
         certificates: certs,
         settings: store.state.settings,
         inbounds: (store.state.inbounds || []).map((i) => enrichInboundWithLinks(i, reqHostHeader))
@@ -2404,6 +2409,7 @@ async function handleRequest(req, res) {
         store.addAudit(session.username, 'issue_selfsigned_cert', cert.domain);
       });
       autoApplyIfEnabled();
+      setImmediate(() => { for (const n of store.state.nodes || []) { if (!n.isLocal && (n.domain === cert.domain || n.role === 'standby' || n.role === 'relay')) { pushConfigToAgentNode(store.state, n.id).catch(() => {}); } } });
       if (bindPanel) setTimeout(() => restartPanelServer(), 300);
       return sendJson(res, 201, { certificate: cert });
     }
@@ -2423,6 +2429,7 @@ async function handleRequest(req, res) {
         store.addAudit(session.username, 'save_custom_cert', cert.domain);
       });
       autoApplyIfEnabled();
+      setImmediate(() => { for (const n of store.state.nodes || []) { if (!n.isLocal && (n.domain === cert.domain || n.role === 'standby' || n.role === 'relay')) { pushConfigToAgentNode(store.state, n.id).catch(() => {}); } } });
       if (bindPanel) setTimeout(() => restartPanelServer(), 300);
       return sendJson(res, 201, { certificate: cert });
     }
@@ -2444,6 +2451,7 @@ async function handleRequest(req, res) {
         store.addAudit(session.username, 'issue_acme_cert', `${cert.domain} (${cert.type})`);
       });
       autoApplyIfEnabled();
+      setImmediate(() => { for (const n of store.state.nodes || []) { if (!n.isLocal && (n.domain === cert.domain || n.role === 'standby' || n.role === 'relay')) { pushConfigToAgentNode(store.state, n.id).catch(() => {}); } } });
       if (bindPanel) setTimeout(() => restartPanelServer(), 300);
       return sendJson(res, 201, { certificate: cert });
     }

@@ -29,6 +29,7 @@ const state = {
   protoFilter: 'all',
   nodeFilter: 'all',
   routingNodeFilter: 'all',
+  aggQrNodeFilter: 'all',
   nodes: [],
   failoverLogs: [],
   overview: null,
@@ -466,7 +467,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.0 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.1 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -1819,6 +1820,41 @@ function renderCertificates() {
         </div>
       </div>
     </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>四、新增干净机器（未搭建 3x-ui）如何接入？子机器还需要安装面板或证书吗？</h2>
+          <p>针对新购空白 VPS（中转机 / 落地机 / 热备机）的最简接入与证书自动同步机制说明</p>
+        </div>
+        <span class="status valid">子机器零面板 · 证书全自动下发</span>
+      </div>
+      <div class="panel-body">
+        <div class="grid-2">
+          <div style="padding:14px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);font-size:13px;line-height:1.7">
+            <b style="color:var(--primary);font-size:14px">1. 新增没有搭建 3x-ui / X-Panel / NexusGate 的干净机器怎么操作？</b>
+            <ul style="margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
+              <li><b>完全不需要在子机器上安装任何面板！</b>只有你现在登录的这台主控机需要安装面板。</li>
+              <li>对于任何新买的空白 VPS（无论是作为<b>新中转机</b>、<b>纯落地机</b>还是<b>热备容灾机</b>）：<br>
+                ① 在主控《中转与落地集群》点击添加对应角色服务器（选「中转机」时只显示域名与容灾配置；只有选「纯落地机」或「一体机」时才会显示并自动启用共享 SS 落地配置）；<br>
+                ② 添加后直接点击该机器卡片上的「<b>📋 复制 Agent 命令</b>」，去那台新 VPS 的 SSH 终端粘贴回车即可！</li>
+              <li>Agent 脚本会在 10 秒内自动完成：安装 Sing-box 内核、开启 <code>BBR + FQ + HY2 64MB</code> 内核加速、限制日志体积（≤32MB）与守护进程内存（仅占 ~14MB 内存），并自动连回主控。之后你在主控《入站节点管理》选择该机器就能直接建节点了！</li>
+            </ul>
+          </div>
+          <div style="padding:14px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);font-size:13px;line-height:1.7">
+            <b style="color:var(--success);font-size:14px">2. 子机器（中转机）上的 TLS / HY2 / AnyTLS 节点证书怎么弄？需要去子机器装证书吗？</b>
+            <ul style="margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
+              <li><b>子机器不需要手动安装证书，也不需要再装证书面板！</b>所有证书统一在主控的《<b>SSL 证书与订阅</b>》页面集中管理。</li>
+              <li><b>具体操作步骤（支持为任意远程中转机域名申请证书）</b>：<br>
+                ① 在主控左侧点击《<b>SSL 证书与订阅</b>》➔ 点击左上角「<b>🌐 ACME 自动申请证书</b>」；<br>
+                ② 在弹窗顶部下拉框直接选择那台中转机的域名（如 <code>jp2.yourdomain.com</code>），申请模式选择「<b>2. Cloudflare DNS API 模式</b>」（会自动带入你保存的 CF Token）；<br>
+                ③ 点击开始签发：主控会通过 Cloudflare DNS 接口完成验证并签发受信任证书，随后<b>自动将证书文件 (<code>fullchain.pem</code> 与 <code>privkey.pem</code>) 加密推送到那台中转机和备用机上</b>！</li>
+              <li>如果你是通过《备份迁移》上传了原 3x-ui 的 <code>.tar.gz</code> 备份包（内含 <code>/root/cert</code>），主控也会自动提取里面的证书并同步分发给对应的中转机与热备机！</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
   `;
 }
 
@@ -3065,19 +3101,43 @@ function openInboundLinksModal(inbound, filterClientId = null) {
 /**
  * Compact All-Nodes Aggregate Subscription & QR Wall Modal
  */
-function openAggregateQrModal() {
-  const allSubUrl = getBaseSubscriptionUrl();
-  const clashSubUrl = `${allSubUrl}?format=clash`;
-  const singboxSubUrl = `${allSubUrl}?format=singbox`;
+function openAggregateQrModal(filterNodeId = null) {
+  if (filterNodeId !== null) {
+    state.aggQrNodeFilter = filterNodeId;
+  }
+  const nf = state.aggQrNodeFilter || 'all';
+  const nodes = state.nodes && state.nodes.length ? state.nodes : [{ id: 'node_local', name: '主控本机 (Local Master)', role: 'relay', domain: state.settings?.webDomain || '' }];
+  const selectedNodeObj = nf !== 'all' ? nodes.find((n) => n.id === nf) : null;
+  const scopeLabel = selectedNodeObj ? `[${selectedNodeObj.name.replace(/\s*\(Local Master\)/, '')}${selectedNodeObj.domain ? ` · ${selectedNodeObj.domain}` : ''}]` : '全部服务器聚合';
 
-  const enabledNodes = state.inbounds.filter((i) => i.enable !== false && i.protocol !== 'direct');
-  const allNodeCards = enabledNodes
-    .flatMap((inb) => (inb.links || []).map((l) => ({ inb, l })))
-    .map(({ inb, l }, idx) => `
+  const baseSubUrl = getBaseSubscriptionUrl();
+  const allSubUrl = nf !== 'all' ? `${baseSubUrl}?node=${encodeURIComponent(nf)}` : baseSubUrl;
+  const clashSubUrl = nf !== 'all' ? `${baseSubUrl}?format=clash&node=${encodeURIComponent(nf)}` : `${baseSubUrl}?format=clash`;
+  const singboxSubUrl = nf !== 'all' ? `${baseSubUrl}?format=singbox&node=${encodeURIComponent(nf)}` : `${baseSubUrl}?format=singbox`;
+
+  const allEnabledInbounds = state.inbounds.filter((i) => i.enable !== false && i.protocol !== 'direct');
+  const enabledNodes = nf === 'all'
+    ? allEnabledInbounds
+    : allEnabledInbounds.filter((i) => (i.nodeId || 'node_local') === nf);
+
+  const flatLinks = enabledNodes.flatMap((inb) => (inb.links || []).map((l) => ({ inb, l })));
+  const allUrisText = flatLinks.map(({ l }) => l.uri).filter(Boolean).join('\n');
+
+  const allNodeCards = flatLinks
+    .map(({ inb, l }, idx) => {
+      const ownerNode = nodes.find((n) => n.id === (inb.nodeId || 'node_local'));
+      const srvName = (ownerNode?.name || inb.nodeName || '主控本机').replace(/\s*\(Local Master\)/, '');
+      const srvDomain = ownerNode?.domain || inb.nodeDomain || ownerNode?.host || '';
+      const rolePrefix = ownerNode?.role === 'exit' ? '落地' : '中转';
+      return `
       <div class="qr-wall-card">
         <div class="qr-wall-head">
           <strong title="${esc(l.name)}">${esc(l.name)}</strong>
           <span class="tag">${esc(inb.protocol.toUpperCase())} :${inb.port}</span>
+        </div>
+        <div class="qr-wall-sub" style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap">
+          <span class="tag ${ownerNode?.role === 'exit' ? 'tls' : 'relay'}" style="font-size:10.5px">🖥 ${rolePrefix}: ${esc(srvName)}${srvDomain ? ` (${esc(srvDomain)})` : ''}</span>
+          ${l.clientName ? `<small class="muted">用户: ${esc(l.clientName)}</small>` : ''}
         </div>
         <div class="qr-wall-actions">
           <button class="primary" data-copy="${esc(l.uri)}">📋 复制链接</button>
@@ -3085,15 +3145,26 @@ function openAggregateQrModal() {
         </div>
         <div id="wall-qr-${idx}" class="subscription-qr hidden"></div>
       </div>
-    `)
+    `;
+    })
     .join('');
 
   openModal(
-    '全节点聚合订阅与二维码中心',
-    `聚合全部 ${enabledNodes.length} 个启用节点`,
+    '全节点聚合订阅与二维码中心 (支持按服务器独立区分)',
+    `${scopeLabel} · 共 ${enabledNodes.length} 个启用节点 (${flatLinks.length} 条连接)`,
     `
     <div class="stack">
-      <div class="section-title" style="margin-top:0">一、全节点聚合订阅链接 (点击可展开二维码)</div>
+      <div class="node-filter-bar" style="margin-bottom:4px">
+        <span style="font-size:12px;font-weight:750;color:var(--muted);margin-right:4px">🖥 按所属服务器区分订阅与二维码:</span>
+        <button type="button" class="filter-pill ${nf === 'all' ? 'active' : ''}" data-action="filter-agg-qr-node" data-node="all">🌐 全部服务器聚合 (${allEnabledInbounds.length})</button>
+        ${nodes.filter((n) => n.role !== 'standby').map((n) => {
+          const cnt = allEnabledInbounds.filter((i) => (i.nodeId || 'node_local') === n.id).length;
+          const rTag = n.role === 'exit' ? '[落地]' : '[中转]';
+          return `<button type="button" class="filter-pill ${nf === n.id ? 'active' : ''}" data-action="filter-agg-qr-node" data-node="${esc(n.id)}">${rTag} ${esc(n.name.replace(/\s*\(Local Master\)/, ''))}${n.domain ? ` (${esc(n.domain)})` : ''} (${cnt})</button>`;
+        }).join('')}
+      </div>
+
+      <div class="section-title" style="margin-top:0">一、聚合订阅链接 — 当前范围：${esc(scopeLabel)} (点击可复制或展开二维码)</div>
       <div class="qr-wall-grid">
         <div class="qr-wall-card">
           <div class="qr-wall-head">
@@ -3101,6 +3172,7 @@ function openAggregateQrModal() {
             <span class="tag">Base64</span>
           </div>
           <div class="qr-wall-sub">v2rayN / Shadowrocket / v2rayNG / NekoBox</div>
+          <code style="font-size:11px;color:var(--primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(allSubUrl)}</code>
           <div class="qr-wall-actions">
             <button class="primary" data-copy="${esc(allSubUrl)}">📋 复制通用订阅</button>
             <button data-qr-inline="agg-qr-b64" data-qr-text="${esc(allSubUrl)}">📱 展开二维码</button>
@@ -3114,6 +3186,7 @@ function openAggregateQrModal() {
             <span class="tag tls">Clash</span>
           </div>
           <div class="qr-wall-sub">内置 AI 专线 / 外贸 Google / 自动测速策略组</div>
+          <code style="font-size:11px;color:var(--primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(clashSubUrl)}</code>
           <div class="qr-wall-actions">
             <button class="primary" data-copy="${esc(clashSubUrl)}">📋 复制 Clash 订阅</button>
             <button data-qr-inline="agg-qr-clash" data-qr-text="${esc(clashSubUrl)}">📱 展开二维码</button>
@@ -3127,6 +3200,7 @@ function openAggregateQrModal() {
             <span class="tag relay">Sing-box</span>
           </div>
           <div class="qr-wall-sub">SFI / SFA / SFM 客户端直接导入</div>
+          <code style="font-size:11px;color:var(--primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(singboxSubUrl)}</code>
           <div class="qr-wall-actions">
             <button class="primary" data-copy="${esc(singboxSubUrl)}">📋 复制 Sing-box 订阅</button>
             <button data-qr-inline="agg-qr-sb" data-qr-text="${esc(singboxSubUrl)}">📱 展开二维码</button>
@@ -3135,9 +3209,12 @@ function openAggregateQrModal() {
         </div>
       </div>
 
-      <div class="section-title">二、全部单节点快速复制与按需展开二维码 (${enabledNodes.length} 个节点)</div>
+      <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <span>二、单节点独立链接与二维码 (${esc(scopeLabel)} · 共 ${flatLinks.length} 条连接)</span>
+        ${allUrisText ? `<button type="button" class="primary" data-copy="${esc(allUrisText)}" style="min-height:28px;padding:4px 10px;font-size:12px">📋 一键复制当前所选全部节点链接 (${flatLinks.length} 条)</button>` : ''}
+      </div>
       <div class="qr-wall-grid">
-        ${allNodeCards || '<div class="empty" style="grid-column:1/-1"><b>暂无已启用的入站节点</b></div>'}
+        ${allNodeCards || '<div class="empty" style="grid-column:1/-1"><b>当前所选服务器下暂无已启用的入站节点</b><span>可切换上方服务器筛选标签，或在【入站节点管理】创建节点</span></div>'}
       </div>
     </div>
     `
@@ -3357,77 +3434,91 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
     })
     .join('');
 
+  const safeZoneId = /^[a-f0-9]{32}$/i.test(String(n.cfZoneId || '').trim()) ? String(n.cfZoneId).trim() : '';
+  const showRelaySection = n.role === 'relay' || n.role === 'hybrid';
+  const showExitSection = n.role === 'exit' || n.role === 'hybrid';
+
   openModal(
     existing ? '编辑集群服务器节点' : '添加集群服务器 (中转机 / 落地机 / 热备容灾机)',
-    existing ? n.name : '一主控统管：中转机绑定独立域名，落地机无需域名自动开启 SS 并加入全局共享落地池',
+    existing ? n.name : '一主控统管：中转机绑定独立域名，落地机免域名自动开启 SS 加入全局共享池',
     `
-    <form id="cluster-node-form" class="form-grid" data-id="${esc(existing?.id || '')}">
+    <form id="cluster-node-form" class="form-grid" data-id="${esc(existing?.id || '')}" autocomplete="off">
+      <div class="wide" style="padding:10px 13px;border-radius:10px;background:var(--surface-soft);border:1px solid var(--line);font-size:12.5px;line-height:1.6">
+        💡 <b>新机器接入说明</b>：添加未安装 3x-ui / NexusGate 的新机器时，保存后直接点击卡片上的「<b>📋 复制 Agent 命令</b>」到新机器 SSH 执行即可（无需在子机器重复安装面板，SSL 证书也由主控统一签发并自动同步下发到子机器）。
+      </div>
       <label>
         服务器备注名称
-        <input name="name" value="${esc(n.name)}" placeholder="例如：香港 CMI 中转 01 / 美国原生落地 01" required>
+        <input name="name" value="${esc(n.name)}" placeholder="例如：香港 CMI 中转 01 / 美国原生落地 01" autocomplete="off" required>
       </label>
       <label>
         服务器角色类型
         <select name="role" id="cluster-role-select">
           <option value="relay"${selected('relay', n.role)}>中转入口机 (Relay · 绑定各自独立域名承载客户)</option>
           <option value="exit"${selected('exit', n.role)}>纯落地机 (Exit · 免域名纯IP，自动开启SS加入全局共享落地池)</option>
-          <option value="hybrid"${selected('hybrid', n.role)}>中转 + 落地一体机 (Hybrid)</option>
+          <option value="hybrid"${selected('hybrid', n.role)}>中转 + 落地一体机 (Hybrid · 兼具入口与共享SS落地)</option>
           <option value="standby"${selected('standby', n.role)}>热备容灾机 (Standby · 主力中转故障时秒级接管)</option>
         </select>
       </label>
       <label>
         服务器公网 IP (IPv4 / IPv6)
-        <input name="host" value="${esc(n.host)}" placeholder="填写该机器公网 IP，如 103.88.12.66" required>
+        <input name="host" value="${esc(n.host)}" placeholder="填写该机器公网 IP，如 103.88.12.66" autocomplete="off" required>
       </label>
       <label>
         Agent 通信端口
-        <input name="agentPort" type="number" value="${esc(n.agentPort || 19090)}" required>
-      </label>
-      <label class="wide">
-        中转机专属域名 (中转机请填写各自绑定的域名，客户端订阅自动匹配该域名；落地机与热备机无域名留空即可)
-        <input name="domain" value="${esc(n.domain || '')}" placeholder="例如：cs.vponlive.com (落地机免填)">
+        <input name="agentPort" type="number" value="${esc(n.agentPort || 19090)}" autocomplete="off" required>
       </label>
 
-      <div class="section-title">落地机自动开启共享 SS 配置 (当角色为「纯落地机」或「一体机」时自动生效，供多台中转机同时勾选转发)</div>
-      <label>
-        落地 Shadowsocks 监听端口
-        <input name="exitPort" type="number" value="${esc(n.exitConfig?.port || 28388)}" placeholder="28388">
-      </label>
-      <label>
-        落地 Shadowsocks 加密方式
-        <select name="exitMethod">
-          <option value="2022-blake3-aes-128-gcm"${selected('2022-blake3-aes-128-gcm', n.exitConfig?.method)}>2022-blake3-aes-128-gcm (极速推荐)</option>
-          <option value="2022-blake3-aes-256-gcm"${selected('2022-blake3-aes-256-gcm', n.exitConfig?.method)}>2022-blake3-aes-256-gcm</option>
-          <option value="aes-256-gcm"${selected('aes-256-gcm', n.exitConfig?.method)}>aes-256-gcm</option>
-          <option value="aes-128-gcm"${selected('aes-128-gcm', n.exitConfig?.method)}>aes-128-gcm</option>
-          <option value="chacha20-ietf-poly1305"${selected('chacha20-ietf-poly1305', n.exitConfig?.method)}>chacha20-ietf-poly1305</option>
-        </select>
-      </label>
-      <label class="wide">
-        落地 Shadowsocks 密码 (选填，留空将自动生成高强度密钥并同步给所有中转机；此外你也可以在《入站节点管理》继续为该落地机添加任意额外节点)
-        <input name="exitPassword" value="${esc(n.exitConfig?.password || '')}" placeholder="留空自动生成标准高强度 SS 密钥">
-      </label>
+      <div id="cluster-domain-wrap" class="form-grid wide" style="margin:0;${showRelaySection ? '' : 'display:none'}">
+        <label class="wide">
+          中转机专属域名 (中转机请填写各自绑定的域名，客户端订阅自动匹配该域名)
+          <input name="domain" value="${esc(n.domain || '')}" placeholder="例如：cs.vponlive.com" autocomplete="off">
+        </label>
+      </div>
 
-      <div class="section-title">秒级容灾热备与 Cloudflare DNS 自动换 IP (支持多个不同 CF 账号与多域名自动识别)</div>
-      <label>
-        绑定备用容灾机 (Standby Node)
-        <select name="standbyNodeId">
-          <option value="">暂不绑定备用机 (请先添加一台角色为「热备容灾机」的节点)</option>
-          ${standbyChoices}
-        </select>
-      </label>
-      <label>
-        该机独立 Cloudflare API Token (选填 · 多 CF 账号专用)
-        <input name="cfApiToken" type="password" value="${esc(n.cfApiToken || '')}" placeholder="留空则默认使用集群页面的全局 CF Token">
-      </label>
-      <label class="wide">
-        Cloudflare Zone ID (强烈建议留空！系统会根据上方填写的「中转机专属域名」自动查询匹配的 Zone ID，多个域名无需手动查填)
-        <input name="cfZoneId" value="${esc(n.cfZoneId || '')}" placeholder="留空即可全自动按域名识别 Zone ID">
-      </label>
-      <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
-        <input type="checkbox" name="mirrorStandby" style="width:16px;min-height:16px" ${n.mirrorStandby !== false ? 'checked' : ''}>
-        <span><b>开启实时热备镜像预热 (Mirror Standby)</b>：平时将本中转机的全部节点与 SSL 证书实时同步到备用机预热，主力机故障时仅需切换 Cloudflare IP 即可 0 秒接管！</span>
-      </label>
+      <div id="cluster-exit-ss-wrap" class="form-grid wide" style="margin:0;${showExitSection ? '' : 'display:none'}">
+        <div class="section-title">落地机自动开启共享 SS 配置 (仅当角色为「纯落地机」或「一体机」时生效，供多台中转机同时勾选转发)</div>
+        <label>
+          落地 Shadowsocks 监听端口
+          <input name="exitPort" type="number" value="${esc(n.exitConfig?.port || 28388)}" placeholder="28388" autocomplete="off">
+        </label>
+        <label>
+          落地 Shadowsocks 加密方式
+          <select name="exitMethod">
+            <option value="2022-blake3-aes-128-gcm"${selected('2022-blake3-aes-128-gcm', n.exitConfig?.method)}>2022-blake3-aes-128-gcm (极速推荐)</option>
+            <option value="2022-blake3-aes-256-gcm"${selected('2022-blake3-aes-256-gcm', n.exitConfig?.method)}>2022-blake3-aes-256-gcm</option>
+            <option value="aes-256-gcm"${selected('aes-256-gcm', n.exitConfig?.method)}>aes-256-gcm</option>
+            <option value="aes-128-gcm"${selected('aes-128-gcm', n.exitConfig?.method)}>aes-128-gcm</option>
+            <option value="chacha20-ietf-poly1305"${selected('chacha20-ietf-poly1305', n.exitConfig?.method)}>chacha20-ietf-poly1305</option>
+          </select>
+        </label>
+        <label class="wide">
+          落地 Shadowsocks 密码 (选填，留空将自动生成高强度密钥并同步给所有中转机；此外也可在《入站节点管理》为该落地机搭建额外节点)
+          <input name="exitPassword" value="${esc(n.exitConfig?.password || '')}" placeholder="留空自动生成标准高强度 SS 密钥" autocomplete="off">
+        </label>
+      </div>
+
+      <div id="cluster-failover-cf-wrap" class="form-grid wide" style="margin:0;${showRelaySection ? '' : 'display:none'}">
+        <div class="section-title">秒级容灾热备与 Cloudflare DNS 自动换 IP (支持多个不同 CF 账号与多域名自动识别)</div>
+        <label>
+          绑定备用容灾机 (Standby Node)
+          <select name="standbyNodeId">
+            <option value="">暂不绑定备用机 (请先添加一台角色为「热备容灾机」的节点)</option>
+            ${standbyChoices}
+          </select>
+        </label>
+        <label>
+          该机独立 Cloudflare API Token (选填 · 多 CF 账号专用)
+          <input name="cfApiToken" type="text" autocomplete="off" spellcheck="false" style="-webkit-text-security:disc" value="${esc(n.cfApiToken || '')}" placeholder="留空则默认使用集群页面的全局 CF Token">
+        </label>
+        <label class="wide">
+          Cloudflare Zone ID (强烈建议留空！系统会根据上方填写的「中转机专属域名」自动查询匹配的 Zone ID，多个域名无需手动查填)
+          <input name="cfZoneId" type="text" autocomplete="off" spellcheck="false" value="${esc(safeZoneId)}" placeholder="留空即可全自动按域名识别 Zone ID (无需填)">
+        </label>
+        <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
+          <input type="checkbox" name="mirrorStandby" style="width:16px;min-height:16px" ${n.mirrorStandby !== false ? 'checked' : ''}>
+          <span><b>开启实时热备镜像预热 (Mirror Standby)</b>：平时将本中转机的全部节点与 SSL 证书实时同步到备用机预热，主力机故障时仅需切换 Cloudflare IP 即可 0 秒接管！</span>
+        </label>
+      </div>
 
       <div class="form-actions">
         <button type="button" data-close>取消</button>
@@ -3439,16 +3530,31 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
 
   const roleSel = $('#cluster-role-select');
   const nameInp = $('#cluster-node-form input[name="name"]');
-  if (roleSel && !existing && nameInp) {
-    roleSel.addEventListener('change', () => {
-      if (roleSel.value === 'exit' && nameInp.value.includes('中转')) {
+  const domainWrap = $('#cluster-domain-wrap');
+  const exitSsWrap = $('#cluster-exit-ss-wrap');
+  const failoverWrap = $('#cluster-failover-cf-wrap');
+
+  const syncRoleVisibility = () => {
+    const curRole = roleSel ? roleSel.value : 'relay';
+    const isRelayLike = curRole === 'relay' || curRole === 'hybrid';
+    const isExitLike = curRole === 'exit' || curRole === 'hybrid';
+    if (domainWrap) domainWrap.style.display = isRelayLike ? '' : 'none';
+    if (exitSsWrap) exitSsWrap.style.display = isExitLike ? '' : 'none';
+    if (failoverWrap) failoverWrap.style.display = isRelayLike ? '' : 'none';
+    if (!existing && nameInp) {
+      if (curRole === 'exit' && (nameInp.value.includes('中转') || nameInp.value.includes('热备'))) {
         nameInp.value = '美国原生落地机 01';
-      } else if (roleSel.value === 'relay' && nameInp.value.includes('落地')) {
+      } else if (curRole === 'relay' && (nameInp.value.includes('落地') || nameInp.value.includes('热备'))) {
         nameInp.value = '香港 CMI 专线中转 01';
-      } else if (roleSel.value === 'standby') {
+      } else if (curRole === 'standby' && (nameInp.value.includes('中转') || nameInp.value.includes('落地'))) {
         nameInp.value = '亚太热备容灾机 S1';
       }
-    });
+    }
+  };
+
+  if (roleSel) {
+    roleSel.addEventListener('change', syncRoleVisibility);
+    syncRoleVisibility();
   }
 }
 
@@ -3796,12 +3902,16 @@ document.addEventListener('click', async (e) => {
       render();
     }
     else if (action === 'open-aggregate-qr-modal') {
-      if (!state.inbounds.length || !state.settings?.subToken) {
+      if (!state.inbounds.length || !state.settings?.subToken || !state.nodes || !state.nodes.length) {
         const data = await api('/api/inbounds');
+        if (Array.isArray(data.nodes)) state.nodes = data.nodes;
         state.inbounds = data.inbounds || [];
         if (data.settings) state.settings = data.settings;
       }
-      openAggregateQrModal();
+      openAggregateQrModal(state.nodeFilter && state.nodeFilter !== 'all' ? state.nodeFilter : 'all');
+    }
+    else if (action === 'filter-agg-qr-node') {
+      openAggregateQrModal(actEl.dataset.node || 'all');
     }
     else if (action === 'set-expiry') {
       const days = Number(actEl.dataset.days || 0);
@@ -4255,41 +4365,75 @@ document.addEventListener('click', async (e) => {
       `);
     }
     else if (action === 'cert-acme') {
-      openModal('ACME 自动申请受信任证书', '签发后自动替换自签证书，并设为面板 HTTPS 与全部 TLS 节点默认证书', `
-        <form id="cert-acme-form" class="form-grid">
+      const savedCfTokens = String(state.settings?.cfApiToken || '').split(/[\r\n,;\s]+/).map((s) => s.trim()).filter(Boolean);
+      const defaultCfToken = savedCfTokens[0] || '';
+      const relayDomains = (state.nodes || []).filter((n) => n.domain).map((n) => ({ name: n.name, domain: n.domain, isLocal: n.isLocal, cfToken: n.cfApiToken || '' }));
+      openModal('ACME 自动申请受信任证书 (支持主控与全部中转机域名统一签发)', '签发后主控会自动将证书推送分发至对应的中转机与热备容灾机，子机器无需装面板或手动申请', `
+        <form id="cert-acme-form" class="form-grid" autocomplete="off">
+          <div class="wide" style="padding:10px 13px;border-radius:10px;background:var(--primary-soft);border:1px solid color-mix(in srgb,var(--primary) 30%,var(--line));font-size:12.5px;line-height:1.6">
+            💡 <b>多中转机证书统一签发说明</b>：子机器（中转机/热备机）只需执行 Agent 命令，<b>不需要再安装面板或手动装证书</b>！<br>
+            • 若要为<b>远程中转机的域名</b>申请证书，请选择「<b>2. Cloudflare DNS API 模式</b>」，主控验证通过后会自动将签发好的证书下发到该中转机与热备机！<br>
+            • 若要为<b>主控本机的域名</b>申请证书，可选「1. HTTP-01 模式」或「2. Cloudflare DNS API 模式」。
+          </div>
+          ${relayDomains.length ? `
+          <label class="wide">
+            快速选择集群中转机已绑定的域名 (点击自动带入下方域名框)
+            <select id="acme-quick-domain-select">
+              <option value="">— 手动输入或从下方选择中转机域名 —</option>
+              ${relayDomains.map((rd) => `<option value="${esc(rd.domain)}" data-local="${rd.isLocal ? '1' : '0'}" data-cftoken="${esc(rd.cfToken)}">${esc(rd.name)} — ${esc(rd.domain)} ${rd.isLocal ? '(主控本机)' : '(远程中转机 · 推荐 CF DNS 模式)'}</option>`).join('')}
+            </select>
+          </label>
+          ` : ''}
           <label>
             申请域名或公网 IP
-            <input name="domain" placeholder="填写已解析到本机的域名" required>
+            <input name="domain" id="acme-domain-input" value="${esc(relayDomains[0]?.domain || state.settings?.webDomain || '')}" placeholder="填写主控或任意中转机的域名" autocomplete="off" required>
           </label>
           <label>
             通知邮箱 (可选)
-            <input name="email" placeholder="admin@example.com">
+            <input name="email" placeholder="admin@example.com" autocomplete="off">
           </label>
           <label class="wide">
             申请模式
-            <select name="mode">
-              <option value="standalone">1. 域名 HTTP-01 模式 (需本机 80 端口放行且域名已解析到本机)</option>
-              <option value="cf">2. Cloudflare DNS API 模式 (无需 80 端口，支持泛域名)</option>
+            <select name="mode" id="acme-mode-select">
+              <option value="cf"${defaultCfToken ? ' selected' : ''}>2. Cloudflare DNS API 模式 (强烈推荐！支持主控为任意远程中转机域名统一签发证书，无需 80 端口)</option>
+              <option value="standalone"${!defaultCfToken ? ' selected' : ''}>1. 域名 HTTP-01 模式 (仅限已解析到主控本机 IP 且开放 80 端口的域名)</option>
               <option value="ip">3. Let's Encrypt 短期 IP 证书模式 (无需域名，直接为公网 IP 签发受信任证书)</option>
             </select>
           </label>
           <label>
-            Cloudflare API Token (仅 CF 模式选填)
-            <input name="cfToken" type="password" placeholder="CF_Token (Edit zone DNS)">
+            Cloudflare API Token (CF DNS 模式使用，已自动带入面板已存 Token)
+            <input name="cfToken" id="acme-cftoken-input" type="text" autocomplete="off" spellcheck="false" style="-webkit-text-security:disc" value="${esc(defaultCfToken)}" placeholder="CF_Token (Edit zone DNS)">
           </label>
           <label>
-            或 CF Global API Key + 邮箱 (仅 CF 模式选填)
+            或 CF Global API Key + 邮箱 (可选)
             <div class="input-row">
-              <input name="cfKey" type="password" placeholder="CF_Key">
-              <input name="cfEmail" placeholder="CF 账号邮箱">
+              <input name="cfKey" type="text" autocomplete="off" style="-webkit-text-security:disc" placeholder="CF_Key">
+              <input name="cfEmail" placeholder="CF 账号邮箱" autocomplete="off">
             </div>
           </label>
           <div class="form-actions">
             <button type="button" data-close>取消</button>
-            <button type="submit" class="primary">开始签发并一键绑定面板与节点</button>
+            <button type="submit" class="primary">开始签发并自动分发至集群节点</button>
           </div>
         </form>
       `);
+      const qSel = $('#acme-quick-domain-select');
+      const dInp = $('#acme-domain-input');
+      const mSel = $('#acme-mode-select');
+      const tInp = $('#acme-cftoken-input');
+      if (qSel && dInp) {
+        qSel.addEventListener('change', () => {
+          if (!qSel.value) return;
+          dInp.value = qSel.value;
+          const opt = qSel.options[qSel.selectedIndex];
+          if (opt && opt.dataset.local === '0' && mSel) {
+            mSel.value = 'cf';
+          }
+          if (opt && opt.dataset.cftoken && tInp) {
+            tInp.value = opt.dataset.cftoken;
+          }
+        });
+      }
     }
     else if (action === 'cert-custom') {
       openModal('导入或粘贴自定义 SSL 证书', '支持粘贴 PEM 内容或指定服务器已有证书路径', `
@@ -4597,10 +4741,17 @@ document.addEventListener('submit', async (e) => {
     }
     else if (form.id === 'cluster-node-form') {
       const id = form.dataset.id;
+      const isExitLike = data.role === 'exit' || data.role === 'hybrid';
       const payload = {
         ...data,
+        exitEnabled: isExitLike,
         mirrorStandby: Boolean(form.querySelector('input[name="mirrorStandby"]')?.checked)
       };
+      if (!isExitLike) {
+        delete payload.exitPort;
+        delete payload.exitMethod;
+        delete payload.exitPassword;
+      }
       let res;
       if (id) {
         res = await api(`/api/cluster/nodes/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) });
