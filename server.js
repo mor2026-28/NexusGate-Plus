@@ -65,14 +65,23 @@ const {
   verifyCloudflareDomainAccess,
   checkClusterHealthAndAutoFailover
 } = require('./lib/failover');
-const { collectSubscriptionItems, formatSubscription } = require('./lib/subscriptions');
+const {
+  buildLinkFromExternalUri,
+  buildMasterSubBaseUrl,
+  buildSubscriptionFormatUrls,
+  collectSubGroupItems,
+  computeSubGroupRuntimeStats,
+  checkAndRecordSubGroupAccess,
+  collectSubscriptionItems,
+  formatSubscription
+} = require('./lib/subscriptions');
 const {
   buildMasterBackupZip,
   extractMasterBackupPayload,
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.6';
+const VERSION = '1.0.7';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -425,6 +434,9 @@ function applyMasterRestore(data, certFiles = new Map(), options = {}) {
     if (data.routing) st.routing = data.routing;
     if (data.dns) st.dns = data.dns;
     if (Array.isArray(data.certificates)) st.certificates = data.certificates;
+    if (Array.isArray(data.subGroups)) st.subGroups = data.subGroups;
+    if (Array.isArray(data.externalNodes)) st.externalNodes = data.externalNodes;
+    if (Array.isArray(data.subAccessLogs)) st.subAccessLogs = data.subAccessLogs;
     if (Array.isArray(data.failoverLogs)) st.failoverLogs = data.failoverLogs;
     if (Array.isArray(data.migrations)) st.migrations = data.migrations;
 
@@ -1431,24 +1443,69 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { status: 'ok', version: VERSION });
     }
 
-    // 2. Public Subscription endpoint (/sub/:token or <basePath>/sub/:token)
+    // 2. Public Subscription endpoint (/sub/:token, <basePath>/sub/:token, /s/:token, /s/:token/:target)
     const configuredSubPath = normalizeBasePath(store.state.settings.subPath || '/sub/');
     const strippedForSub = stripBasePath(rawPathname, store.state.settings.webBasePath) || rawPathname;
     for (const candidatePath of [rawPathname, strippedForSub]) {
       const subMatch = route(`${configuredSubPath === '/' ? '/sub' : configuredSubPath}/:token`, candidatePath)
-        || route('/sub/:token', candidatePath);
+        || route('/sub/:token', candidatePath)
+        || route('/s/:token/:target', candidatePath)
+        || route('/s/:token', candidatePath);
       if (subMatch && method === 'GET') {
         if (store.state.settings.subEnable === false) {
           return sendError(res, 403, '订阅功能已关闭', 'sub_disabled');
         }
-        const ua = String(req.headers['user-agent'] || '').toLowerCase();
-        const fmt = url.searchParams.get('format')
-          || (ua.includes('clash') || ua.includes('mihomo') || ua.includes('stash') ? 'clash' : (ua.includes('sing-box') || ua.includes('sfi') ? 'singbox' : 'base64'));
-        const output = formatSubscription(store.state, subMatch.token, fmt, reqHostHeader, url.searchParams.get('node') || '');
+        const rawUa = String(req.headers['user-agent'] || '');
+        const ua = rawUa.toLowerCase();
+        const targetParam = String(subMatch.target || url.searchParams.get('format') || 'auto').toLowerCase();
+        let fmt = targetParam;
+        if (fmt === 'auto' || !fmt) {
+          if (ua.includes('clash') || ua.includes('mihomo') || ua.includes('stash') || ua.includes('verge')) fmt = 'clash';
+          else if (ua.includes('sing-box') || ua.includes('singbox') || ua.includes('sfi') || ua.includes('sfa') || ua.includes('nekobox')) fmt = 'singbox';
+          else if (ua.includes('surge')) fmt = 'surge';
+          else fmt = 'base64';
+        } else if (fmt === 'v2ray' || fmt === 'shadowrocket') {
+          fmt = 'base64';
+        }
+
+        const matchedSubGroup = (store.state.subGroups || []).find((g) => g.token === subMatch.token || g.id === subMatch.token);
+        let subGroupStats = null;
+        let recordSubLogFn = null;
+        if (matchedSubGroup) {
+          const clientIp = String(req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket?.remoteAddress || '127.0.0.1').split(',')[0].trim();
+          const deviceId = String(req.headers['x-device-id'] || req.headers['x-client-id'] || '').trim();
+          const accessRes = checkAndRecordSubGroupAccess(
+            store,
+            matchedSubGroup,
+            { ip: clientIp, userAgent: rawUa, deviceId, format: fmt },
+            singbox
+          );
+          if (!accessRes.allowed) {
+            return sendError(res, accessRes.statusCode || 403, accessRes.reason || '订阅访问受限', 'sub_access_denied');
+          }
+          subGroupStats = accessRes.stats;
+          recordSubLogFn = accessRes.recordLog;
+        }
+
+        const filterNode = url.searchParams.get('node') || '';
+        const filterItems = url.searchParams.get('items') || url.searchParams.get('nodes') || '';
+        const output = formatSubscription(
+          store.state,
+          subMatch.token,
+          fmt,
+          reqHostHeader,
+          filterNode,
+          filterItems,
+          subGroupStats,
+          matchedSubGroup
+        );
         if (!output) {
           res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
           res.end('404 Not Found');
           return;
+        }
+        if (recordSubLogFn) {
+          recordSubLogFn(true, '允许访问', Buffer.byteLength(output.body || ''));
         }
         res.writeHead(200, {
           'content-type': output.contentType,
@@ -1630,6 +1687,7 @@ async function handleRequest(req, res) {
           relayNodes: nodes.filter((n) => n.role === 'relay' || n.role === 'hybrid').length,
           exitNodes: nodes.filter((n) => n.role === 'exit' || n.role === 'hybrid').length,
           standbyNodes: nodes.filter((n) => n.role === 'standby').length,
+          subGroups: (store.state.subGroups || []).length,
           inbounds: inbounds.length,
           activeInbounds: inbounds.filter((i) => i.enable !== false).length,
           clients: totalClients,
@@ -3200,6 +3258,383 @@ async function handleRequest(req, res) {
       });
       sessions.clearAll();
       return sendJson(res, 200, { ok: true, message: '账号密码已更新，请重新登录' });
+    }
+
+    // 14.5 Custom Multi-Node Subscription Center (SubVault · 跨机自由选节点组合订阅中心)
+    if (pathname === '/api/subcenter' && method === 'GET') {
+      ensureClusterNodes(store.state);
+      const protoHint = store.state.settings?.webCertFile ? 'https' : 'http';
+      const masterBaseUrl = buildMasterSubBaseUrl(store.state, reqHostHeader, protoHint);
+      const enrichedGroups = (store.state.subGroups || []).map((g) => {
+        const stats = computeSubGroupRuntimeStats(store.state, g, singbox);
+        const urls = buildSubscriptionFormatUrls(store.state, g.token, reqHostHeader, protoHint);
+        const resolvedItems = collectSubGroupItems(store.state, g, reqHostHeader).map((it) => ({
+          name: it.link.name,
+          protocol: it.link.protocol || it.inbound?.protocol || 'vless',
+          uri: it.link.uri,
+          nodeId: it.nodeId || it.inbound?.nodeId || 'node_local',
+          nodeName: it.nodeName || '主控本机',
+          nodeDomain: it.nodeDomain || ''
+        }));
+        return {
+          ...g,
+          stats,
+          urls,
+          resolvedItems
+        };
+      });
+
+      const candidateOptions = [];
+      for (const inb of store.state.inbounds || []) {
+        if (inb.protocol === 'direct') continue;
+        const nObj = (store.state.nodes || []).find((n) => n.id === (inb.nodeId || 'node_local'));
+        const nodeName = nObj ? nObj.name.replace(/\s*\(Local Master\)/, '') : '主控本机';
+        const nodeDomain = nObj?.domain || inb.publicHost || nObj?.host || '';
+        candidateOptions.push({
+          key: inb.id,
+          kind: 'inbound',
+          inboundId: inb.id,
+          nodeId: inb.nodeId || 'node_local',
+          nodeName,
+          nodeDomain,
+          protocol: inb.protocol,
+          port: inb.port,
+          remark: inb.remark,
+          clientsCount: (inb.clients || []).length,
+          enable: inb.enable !== false
+        });
+        if ((inb.clients || []).length > 1) {
+          for (const c of inb.clients) {
+            candidateOptions.push({
+              key: `${inb.id}::${c.id}`,
+              kind: 'client',
+              inboundId: inb.id,
+              clientId: c.id,
+              nodeId: inb.nodeId || 'node_local',
+              nodeName,
+              nodeDomain,
+              protocol: inb.protocol,
+              port: inb.port,
+              remark: `${inb.remark} · 用户: ${c.email}`,
+              enable: c.enable !== false && inb.enable !== false
+            });
+          }
+        }
+      }
+      for (const ext of store.state.externalNodes || []) {
+        candidateOptions.push({
+          key: ext.id,
+          kind: 'external',
+          nodeId: 'external',
+          nodeName: ext.groupName || '外部导入节点',
+          nodeDomain: '外部节点',
+          protocol: ext.protocol || 'vless',
+          port: 0,
+          remark: ext.name,
+          enable: ext.enabled !== false
+        });
+      }
+
+      return sendJson(res, 200, {
+        masterBaseUrl,
+        subGroups: enrichedGroups,
+        candidateOptions,
+        externalNodes: store.state.externalNodes || [],
+        nodes: store.state.nodes || [],
+        accessLogs: (store.state.subAccessLogs || []).slice(0, 150),
+        settings: store.state.settings
+      });
+    }
+
+    if (pathname === '/api/subcenter/groups' && method === 'POST') {
+      const body = await readJson(req);
+      const name = String(body.name || '').trim();
+      if (!name) return sendError(res, 400, '请输入组合订阅名称（如：客户A·港日美专线）');
+      const selectedItems = Array.isArray(body.selectedItems)
+        ? [...new Set(body.selectedItems.map((x) => String(x || '').trim()).filter(Boolean))]
+        : [];
+      const customUris = Array.isArray(body.customUris)
+        ? body.customUris.map((x) => String(x || '').trim()).filter(Boolean)
+        : String(body.customUris || '').split(/[\r\n]+/).map((x) => x.trim()).filter(Boolean);
+
+      if (!selectedItems.length && !customUris.length) {
+        return sendError(res, 400, '请至少勾选 1 个集群节点或填写 1 条外部节点链接');
+      }
+
+      const ipLimit = Math.max(0, Number(body.ipLimit || 0));
+      const deviceLimit = Math.max(0, Number(body.deviceLimit || 0));
+      const accessWindowHours = Math.max(1, Math.min(720, Number(body.accessWindowHours || 24)));
+      const syncNodeLimits = body.syncNodeLimits !== false;
+      const totalGB = Math.max(0, Number(body.totalGB || 0));
+      const totalBytes = totalGB > 0 ? Math.round(totalGB * (1024 ** 3)) : 0;
+      const expiryTime = parseExpiryTimeInput(body.expiryTime, 0);
+
+      let newGroup;
+      store.transact((st) => {
+        if (!Array.isArray(st.subGroups)) st.subGroups = [];
+        newGroup = {
+          id: `subgrp_${crypto.randomBytes(4).toString('hex')}`,
+          name,
+          groupName: String(body.groupName || '默认分组').trim() || '默认分组',
+          token: String(body.token || '').trim() || generateStrongCredential(24),
+          enabled: body.enabled !== false,
+          selectedItems,
+          customUris,
+          ipLimit,
+          deviceLimit,
+          accessWindowHours,
+          syncNodeLimits,
+          totalGB,
+          totalBytes,
+          upOffset: 0,
+          downOffset: 0,
+          expiryTime,
+          notes: String(body.notes || '').trim(),
+          accessKeys: [],
+          lastAccessAt: '',
+          pullCount: 0,
+          blockedCount: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        st.subGroups.unshift(newGroup);
+
+        // Optionally synchronize IP/Device limits to selected single-user inbounds or specific clients
+        if (syncNodeLimits && (ipLimit > 0 || deviceLimit > 0)) {
+          const selSet = new Set(selectedItems);
+          for (const inb of st.inbounds || []) {
+            if (selSet.has(inb.id) && (inb.clients || []).length <= 1) {
+              if (ipLimit > 0) {
+                inb.limitIp = ipLimit;
+                if (inb.clients?.[0]) inb.clients[0].limitIp = ipLimit;
+              }
+              if (deviceLimit > 0) {
+                inb.limitDevice = deviceLimit;
+                if (inb.clients?.[0]) inb.clients[0].limitDevice = deviceLimit;
+              }
+            }
+            for (const c of inb.clients || []) {
+              if (selSet.has(`${inb.id}::${c.id}`)) {
+                if (ipLimit > 0) c.limitIp = ipLimit;
+                if (deviceLimit > 0) c.limitDevice = deviceLimit;
+              }
+            }
+          }
+        }
+        store.addAudit(session.username, 'create_subgroup', `${name} (${selectedItems.length + customUris.length} 节点 · IP限:${ipLimit || '∞'} 设备限:${deviceLimit || '∞'})`);
+      });
+
+      const protoHint = store.state.settings?.webCertFile ? 'https' : 'http';
+      return sendJson(res, 201, {
+        subGroup: {
+          ...newGroup,
+          stats: computeSubGroupRuntimeStats(store.state, newGroup, singbox),
+          urls: buildSubscriptionFormatUrls(store.state, newGroup.token, reqHostHeader, protoHint)
+        }
+      });
+    }
+
+    if (pathname === '/api/subcenter/groups/bulk' && method === 'POST') {
+      const body = await readJson(req);
+      const ids = Array.isArray(body.ids) ? new Set(body.ids.map(String)) : new Set();
+      const action = String(body.action || '').trim();
+      if (!ids.size) return sendError(res, 400, '请先勾选要操作的组合订阅');
+      let affected = 0;
+      store.transact((st) => {
+        if (!Array.isArray(st.subGroups)) st.subGroups = [];
+        if (action === 'delete') {
+          const before = st.subGroups.length;
+          st.subGroups = st.subGroups.filter((g) => !ids.has(g.id));
+          affected = before - st.subGroups.length;
+        } else {
+          for (const g of st.subGroups) {
+            if (!ids.has(g.id)) continue;
+            affected += 1;
+            if (action === 'enable') g.enabled = true;
+            else if (action === 'disable') g.enabled = false;
+            else if (action === 'clear-access') g.accessKeys = [];
+            else if (action === 'group' && body.groupName) g.groupName = String(body.groupName).trim();
+            else if (action === 'renew-30d') {
+              const baseMs = (g.expiryTime && g.expiryTime > Date.now()) ? g.expiryTime : Date.now();
+              g.expiryTime = baseMs + 30 * 86400 * 1000;
+              g.enabled = true;
+            }
+            g.updatedAt = new Date().toISOString();
+          }
+        }
+        store.addAudit(session.username, 'bulk_subgroups', `${action} (${affected} 个订阅)`);
+      });
+      return sendJson(res, 200, { ok: true, affected });
+    }
+
+    const subGroupMatch = route('/api/subcenter/groups/:id', pathname);
+    if (subGroupMatch && method === 'PUT') {
+      const body = await readJson(req);
+      let updatedGroup;
+      store.transact((st) => {
+        const existing = (st.subGroups || []).find((g) => g.id === subGroupMatch.id);
+        if (!existing) {
+          const err = new Error('未找到该组合订阅');
+          err.statusCode = 404;
+          throw err;
+        }
+        if (body.name !== undefined) existing.name = String(body.name).trim() || existing.name;
+        if (body.groupName !== undefined) existing.groupName = String(body.groupName).trim() || '默认分组';
+        if (body.enabled !== undefined) existing.enabled = Boolean(body.enabled);
+        if (Array.isArray(body.selectedItems)) {
+          existing.selectedItems = [...new Set(body.selectedItems.map((x) => String(x || '').trim()).filter(Boolean))];
+        }
+        if (body.customUris !== undefined) {
+          existing.customUris = Array.isArray(body.customUris)
+            ? body.customUris.map((x) => String(x || '').trim()).filter(Boolean)
+            : String(body.customUris || '').split(/[\r\n]+/).map((x) => x.trim()).filter(Boolean);
+        }
+        if (body.ipLimit !== undefined) existing.ipLimit = Math.max(0, Number(body.ipLimit || 0));
+        if (body.deviceLimit !== undefined) existing.deviceLimit = Math.max(0, Number(body.deviceLimit || 0));
+        if (body.accessWindowHours !== undefined) existing.accessWindowHours = Math.max(1, Math.min(720, Number(body.accessWindowHours || 24)));
+        if (body.syncNodeLimits !== undefined) existing.syncNodeLimits = Boolean(body.syncNodeLimits);
+        if (body.totalGB !== undefined) {
+          existing.totalGB = Math.max(0, Number(body.totalGB || 0));
+          existing.totalBytes = existing.totalGB > 0 ? Math.round(existing.totalGB * (1024 ** 3)) : 0;
+        }
+        if (body.expiryTime !== undefined) {
+          existing.expiryTime = parseExpiryTimeInput(body.expiryTime, 0);
+        }
+        if (body.notes !== undefined) existing.notes = String(body.notes || '').trim();
+        existing.updatedAt = new Date().toISOString();
+
+        if (existing.syncNodeLimits && (existing.ipLimit > 0 || existing.deviceLimit > 0)) {
+          const selSet = new Set(existing.selectedItems || []);
+          for (const inb of st.inbounds || []) {
+            if (selSet.has(inb.id) && (inb.clients || []).length <= 1) {
+              if (existing.ipLimit > 0) {
+                inb.limitIp = existing.ipLimit;
+                if (inb.clients?.[0]) inb.clients[0].limitIp = existing.ipLimit;
+              }
+              if (existing.deviceLimit > 0) {
+                inb.limitDevice = existing.deviceLimit;
+                if (inb.clients?.[0]) inb.clients[0].limitDevice = existing.deviceLimit;
+              }
+            }
+            for (const c of inb.clients || []) {
+              if (selSet.has(`${inb.id}::${c.id}`)) {
+                if (existing.ipLimit > 0) c.limitIp = existing.ipLimit;
+                if (existing.deviceLimit > 0) c.limitDevice = existing.deviceLimit;
+              }
+            }
+          }
+        }
+
+        updatedGroup = existing;
+        store.addAudit(session.username, 'update_subgroup', existing.name);
+      });
+      const protoHint = store.state.settings?.webCertFile ? 'https' : 'http';
+      return sendJson(res, 200, {
+        subGroup: {
+          ...updatedGroup,
+          stats: computeSubGroupRuntimeStats(store.state, updatedGroup, singbox),
+          urls: buildSubscriptionFormatUrls(store.state, updatedGroup.token, reqHostHeader, protoHint)
+        }
+      });
+    }
+
+    if (subGroupMatch && method === 'DELETE') {
+      store.transact((st) => {
+        const target = (st.subGroups || []).find((g) => g.id === subGroupMatch.id);
+        if (!target) {
+          const err = new Error('未找到该组合订阅');
+          err.statusCode = 404;
+          throw err;
+        }
+        st.subGroups = (st.subGroups || []).filter((g) => g.id !== subGroupMatch.id);
+        store.addAudit(session.username, 'delete_subgroup', target.name);
+      });
+      return sendJson(res, 200, { ok: true });
+    }
+
+    const subGroupActionMatch = route('/api/subcenter/groups/:id/action', pathname);
+    if (subGroupActionMatch && method === 'POST') {
+      const body = await readJson(req);
+      const act = String(body.action || '').trim();
+      let updatedGroup;
+      store.transact((st) => {
+        const g = (st.subGroups || []).find((x) => x.id === subGroupActionMatch.id);
+        if (!g) {
+          const err = new Error('未找到该组合订阅');
+          err.statusCode = 404;
+          throw err;
+        }
+        if (act === 'rotate-token') {
+          g.token = generateStrongCredential(24);
+        } else if (act === 'reset-traffic') {
+          const stStats = computeSubGroupRuntimeStats(st, g, singbox);
+          g.upOffset = stStats.rawUp;
+          g.downOffset = stStats.rawDown;
+        } else if (act === 'clear-access') {
+          g.accessKeys = [];
+        } else if (act === 'toggle') {
+          g.enabled = g.enabled === false;
+        }
+        g.updatedAt = new Date().toISOString();
+        updatedGroup = g;
+        store.addAudit(session.username, `subgroup_${act}`, g.name);
+      });
+      const protoHint = store.state.settings?.webCertFile ? 'https' : 'http';
+      return sendJson(res, 200, {
+        ok: true,
+        subGroup: {
+          ...updatedGroup,
+          stats: computeSubGroupRuntimeStats(store.state, updatedGroup, singbox),
+          urls: buildSubscriptionFormatUrls(store.state, updatedGroup.token, reqHostHeader, protoHint)
+        }
+      });
+    }
+
+    if (pathname === '/api/subcenter/external-nodes' && method === 'POST') {
+      const body = await readJson(req);
+      const lines = Array.isArray(body.uris)
+        ? body.uris.map((x) => String(x || '').trim()).filter(Boolean)
+        : String(body.uris || body.uri || '').split(/[\r\n]+/).map((x) => x.trim()).filter(Boolean);
+      if (!lines.length) return sendError(res, 400, '请粘贴至少 1 条节点分享链接');
+      const groupName = String(body.groupName || '外部专线').trim() || '外部专线';
+      const customName = String(body.name || '').trim();
+      const created = [];
+      store.transact((st) => {
+        if (!Array.isArray(st.externalNodes)) st.externalNodes = [];
+        lines.forEach((line, idx) => {
+          const nameHint = lines.length === 1 && customName ? customName : (customName ? `${customName}-${idx + 1}` : '');
+          const parsed = buildLinkFromExternalUri(line, nameHint);
+          if (!parsed) return;
+          const item = {
+            id: `ext_${crypto.randomBytes(4).toString('hex')}`,
+            name: parsed.name,
+            groupName,
+            protocol: parsed.protocol,
+            uri: parsed.uri,
+            enabled: body.enabled !== false,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          };
+          st.externalNodes.push(item);
+          created.push(item);
+        });
+        store.addAudit(session.username, 'import_external_nodes', `导入 ${created.length} 个外部订阅节点`);
+      });
+      if (!created.length) return sendError(res, 400, '未能解析出有效的节点链接，请检查格式');
+      return sendJson(res, 201, { ok: true, count: created.length, items: created });
+    }
+
+    const extNodeMatch = route('/api/subcenter/external-nodes/:id', pathname);
+    if (extNodeMatch && method === 'DELETE') {
+      store.transact((st) => {
+        st.externalNodes = (st.externalNodes || []).filter((x) => x.id !== extNodeMatch.id);
+        for (const g of st.subGroups || []) {
+          if (Array.isArray(g.selectedItems)) {
+            g.selectedItems = g.selectedItems.filter((k) => k !== extNodeMatch.id);
+          }
+        }
+      });
+      return sendJson(res, 200, { ok: true });
     }
 
     // 14.8 Master-Standby HA & Autonomous Data Plane Endpoints

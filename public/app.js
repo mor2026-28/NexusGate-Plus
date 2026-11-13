@@ -4,7 +4,7 @@ const BASE_PATH = (window.__NG_BASE_PATH__ && window.__NG_BASE_PATH__ !== '/')
   ? window.__NG_BASE_PATH__.replace(/\/+$/, '')
   : '';
 
-const VALID_PAGES = ['overview', 'cluster', 'inbounds', 'routing', 'outbounds', 'migrate', 'certificates', 'settings', 'guide'];
+const VALID_PAGES = ['overview', 'cluster', 'inbounds', 'routing', 'outbounds', 'subcenter', 'migrate', 'certificates', 'settings', 'guide'];
 
 function getSavedInitialPage() {
   try {
@@ -40,6 +40,15 @@ const state = {
   routing: { final: 'direct', rules: [], ruleSets: [] },
   dns: { strategy: 'prefer_ipv4' },
   certificates: [],
+  subGroups: [],
+  subCandidateOptions: [],
+  externalNodes: [],
+  subAccessLogs: [],
+  masterSubBaseUrl: '',
+  subSearch: '',
+  subGroupFilter: 'all',
+  subStatusFilter: 'all',
+  aggSelectedKeys: null,
   defaultSettings: { defaultTlsDomain: 'www.apple.com', defaultCertFile: '', defaultKeyFile: '' },
   settings: {},
   admin: {},
@@ -268,12 +277,15 @@ function updateSidebarBadges() {
   const clEl = $('#nav-badge-cluster');
   const inbEl = $('#nav-badge-inbounds');
   const outEl = $('#nav-badge-outbounds');
+  const subEl = $('#nav-badge-subcenter');
   const nodeCnt = (state.nodes && state.nodes.length) || state.overview?.counts?.nodes || 1;
   const inbCnt = (state.inbounds && state.inbounds.length) || (state.clusterInboundsSummary && state.clusterInboundsSummary.length) || state.overview?.counts?.inbounds || 0;
   const outCnt = (state.outbounds && state.outbounds.filter((o) => !o.builtin).length) || state.overview?.counts?.outbounds || 0;
   if (clEl) clEl.textContent = String(nodeCnt);
   if (inbEl) inbEl.textContent = String(inbCnt);
   if (outEl) outEl.textContent = String(outCnt);
+  const subCnt = (state.subGroups && state.subGroups.length) || state.overview?.counts?.subGroups || 0;
+  if (subEl) subEl.textContent = String(subCnt);
 }
 
 function updateSidebarIndicator() {
@@ -403,6 +415,16 @@ async function load(page = state.page, options = {}) {
       state.outbounds = data.outbounds || [];
       if (data.inbounds && !state.inbounds.length) state.inbounds = data.inbounds;
       if (data.routing) state.routing = data.routing;
+    } else if (page === 'subcenter') {
+      const data = await api('/api/subcenter');
+      if (page !== state.page || seq !== currentLoadSeq) return;
+      state.subGroups = data.subGroups || [];
+      state.subCandidateOptions = data.candidateOptions || [];
+      state.externalNodes = data.externalNodes || [];
+      state.subAccessLogs = data.accessLogs || [];
+      state.masterSubBaseUrl = data.masterBaseUrl || '';
+      if (Array.isArray(data.nodes) && data.nodes.length) state.nodes = data.nodes;
+      if (data.settings) state.settings = data.settings;
     } else if (page === 'migrate') {
       const [st, cl] = await Promise.all([api('/api/settings'), api('/api/cluster/nodes').catch(() => ({}))]);
       if (page !== state.page || seq !== currentLoadSeq) return;
@@ -461,13 +483,14 @@ function setPage(page) {
     inbounds: '入站节点管理',
     routing: '路由规则 (转发)',
     outbounds: '出站规则 (中转)',
+    subcenter: '组合订阅中心 (跨机自由选节点)',
     migrate: '备份迁移',
     certificates: 'SSL 证书与订阅',
     settings: '面板设置与安全',
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.6 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.7 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -535,7 +558,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.6</span>
+          <span class="tag">NexusGate Plus v1.0.7</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -1601,6 +1624,563 @@ function renderOutbounds() {
   `;
 }
 
+
+function renderSubCenter() {
+  const groups = state.subGroups || [];
+  const candidates = state.subCandidateOptions || [];
+  const extNodes = state.externalNodes || [];
+  const logs = state.subAccessLogs || [];
+  const q = (state.subSearch || '').toLowerCase();
+  const gf = state.subGroupFilter || 'all';
+  const sf = state.subStatusFilter || 'all';
+
+  const distinctGroupNames = [...new Set(groups.map((g) => g.groupName || '默认分组'))];
+  const activeGroupsCount = groups.filter((g) => (g.stats?.status || 'active') === 'active').length;
+  const totalOnlineIps = new Set(groups.flatMap((g) => g.stats?.combinedIps || [])).size;
+  const totalOnlineDevs = groups.reduce((acc, g) => acc + Number(g.stats?.combinedDeviceCount || 0), 0);
+  const totalPulls = groups.reduce((acc, g) => acc + Number(g.pullCount || 0), 0);
+  const totalBlocked = groups.reduce((acc, g) => acc + Number(g.blockedCount || 0), 0);
+
+  const masterDomainHost = state.settings?.webDomain || window.location.hostname || state.settings?.publicIPv4 || '主控域名';
+  const masterSubExample = state.masterSubBaseUrl
+    ? `${state.masterSubBaseUrl}${(state.settings?.subPath || '/sub/').replace(/\/+$/, '')}/<独立24位Token>`
+    : `${window.location.origin}/sub/<独立24位Token>`;
+
+  const filteredGroups = groups.filter((g) => {
+    const st = g.stats?.status || (g.enabled === false ? 'disabled' : 'active');
+    if (gf !== 'all' && (g.groupName || '默认分组') !== gf) return false;
+    if (sf !== 'all' && st !== sf) return false;
+    if (!q) return true;
+    const nodeNames = (g.stats?.includedNodes || []).map((n) => `${n.nodeName} ${n.remark}`).join(' ');
+    return [g.name, g.groupName, g.notes, nodeNames].join(' ').toLowerCase().includes(q);
+  });
+
+  const rows = filteredGroups.map((g) => {
+    const st = g.stats || {};
+    const statusKey = st.status || (g.enabled === false ? 'disabled' : 'active');
+    const statusBadge = statusKey === 'active'
+      ? '<span class="status active">正常有效</span>'
+      : (statusKey === 'expired'
+          ? '<span class="status error">已到期</span>'
+          : (statusKey === 'exhausted' ? '<span class="status pending">流量耗尽</span>' : '<span class="status disabled">已停用</span>'));
+
+    const usedBytes = Number(st.usedBytes || 0);
+    const totalBytes = Number(st.totalBytes || 0);
+    const quotaStr = totalBytes > 0 ? fmtBytes(totalBytes) : '∞ (不限)';
+    const incNodes = st.includedNodes || [];
+    const nodePills = incNodes.slice(0, 4).map((n) =>
+      `<span class="tag" style="margin:2px 4px 2px 0" title="服务器: ${esc(n.nodeName)} (${esc(n.nodeDomain)})">[🖥 ${esc(n.nodeName)}] ${esc(n.remark)}</span>`
+    ).join('') + (incNodes.length > 4 ? `<span class="tag tls">+${incNodes.length - 4} 个节点</span>` : '');
+
+    const ipLim = Number(g.ipLimit || 0);
+    const devLim = Number(g.deviceLimit || 0);
+    const curIps = Number(st.combinedIpCount || 0);
+    const curDevs = Number(st.combinedDeviceCount || 0);
+    const expStr = g.expiryTime && g.expiryTime > 0
+      ? `${fmtDate(g.expiryTime)} (${g.expiryTime <= Date.now() ? '已过期' : `剩${Math.ceil((g.expiryTime - Date.now()) / 86400000)}天`})`
+      : '永久有效';
+
+    return `
+      <tr>
+        <td style="width:38px">
+          <input type="checkbox" class="subgrp-check" value="${esc(g.id)}" style="width:15px;min-height:15px">
+        </td>
+        <td>
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <strong>${esc(g.name)}</strong>
+            <span class="tag tls">${esc(g.groupName || '默认分组')}</span>
+            <span class="tag">${incNodes.length} 个跨机节点</span>
+          </div>
+          ${g.notes ? `<small class="muted" style="display:block;margin-top:2px">备注: ${esc(g.notes)}</small>` : ''}
+          <small class="muted">Token: <code>${esc((g.token || '').slice(0, 10))}…</code> · 拉取 ${g.pullCount || 0} 次${g.blockedCount ? ` · <b style="color:var(--danger)">拦截 ${g.blockedCount} 次</b>` : ''}</small>
+        </td>
+        <td style="max-width:340px">
+          <div style="display:flex;flex-wrap:wrap">${nodePills || '<small class="muted">未选节点</small>'}</div>
+        </td>
+        <td>${statusBadge}</td>
+        <td>
+          <div><span class="status valid">↑ ${fmtBytes(st.usedUp || 0)} / ↓ ${fmtBytes(st.usedDown || 0)}</span></div>
+          <small>已用: <b>${fmtBytes(usedBytes)}</b> / ${esc(quotaStr)}</small>
+        </td>
+        <td>
+          <div>
+            <span class="tag ${curIps > 0 ? 'tls' : ''}">IP: <b>${curIps}</b> / ${ipLim > 0 ? ipLim : '∞'}</span>
+            <span class="tag ${curDevs > 0 ? 'relay' : ''}">设备: <b>${curDevs}</b> / ${devLim > 0 ? devLim : '∞'}</span>
+          </div>
+          <small class="muted">${g.accessWindowHours || 24}h 活跃窗口${g.syncNodeLimits !== false ? ' · 已联动节点实连限制' : ''}</small>
+        </td>
+        <td><small>${esc(expStr)}</small></td>
+        <td>
+          <div class="actions">
+            <button class="primary" data-action="subgrp-links" data-id="${esc(g.id)}">📱 订阅链接/二维码</button>
+            <button data-action="subgrp-access" data-id="${esc(g.id)}" title="查看在线连接 IP 与拉取设备型号，支持一键解绑">👁 设备/IP (${curIps})</button>
+            <button data-action="edit-subgrp" data-id="${esc(g.id)}">编辑组合</button>
+            <button data-action="subgrp-action" data-sub-act="reset-traffic" data-id="${esc(g.id)}">清零流量</button>
+            <button data-action="subgrp-action" data-sub-act="toggle" data-id="${esc(g.id)}">${g.enabled !== false ? '停用' : '启用'}</button>
+            <button class="danger" data-action="delete-subgrp" data-id="${esc(g.id)}">删除</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  const extRows = extNodes.map((ext, i) => `
+    <tr>
+      <td><strong>${i + 1}</strong></td>
+      <td><strong>${esc(ext.name)}</strong><small class="muted">分组: ${esc(ext.groupName || '外部专线')}</small></td>
+      <td><span class="tag relay">${esc((ext.protocol || 'vless').toUpperCase())}</span></td>
+      <td><code style="font-size:11px;display:block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(ext.uri)}</code></td>
+      <td style="text-align:right">
+        <button data-copy="${esc(ext.uri)}">复制</button>
+        <button class="danger" data-action="delete-ext-node" data-id="${esc(ext.id)}">删除</button>
+      </td>
+    </tr>
+  `).join('');
+
+  const logRows = logs.slice(0, 20).map((l) => `
+    <tr>
+      <td><small>${fmtDateTime(l.at)}</small></td>
+      <td><strong>${esc(l.subName || '未知订阅')}</strong></td>
+      <td><span class="status ${l.allowed ? 'active' : 'error'}">${l.allowed ? '✓ 允许' : '⊘ 拦截'}</span></td>
+      <td><code>${esc(l.ip)}</code><small class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.device)}</small></td>
+      <td><span class="tag">${esc(l.format || 'auto')}</span></td>
+      <td><small style="color:${l.allowed ? 'var(--muted)' : 'var(--danger)'}">${esc(l.reason || '')}</small></td>
+    </tr>
+  `).join('');
+
+  return `
+    <section class="cluster-hub-banner" style="margin-bottom:14px">
+      <div class="cluster-hub-left">
+        <div class="cluster-hub-title">
+          <span class="tag tls">SubVault · 跨机自由组合订阅中心</span>
+          <span>A 机 + B 机 + C 机任意节点自由组合 · 独立 Token 与跨机设备/IP 数限制</span>
+        </div>
+        <p class="cluster-hub-desc">
+          • <b>订阅入口统一使用主控域名</b>：生成的订阅链接统一走主控域名（<code>${esc(masterSubExample)}</code>，同时兼容 <code>/s/Token/auto</code>），而下发给客户端的具体节点则自动保持 <b>A 机、B 机、C 机各自的独立域名</b>！<br>
+          • <b>双重连接设备数 / IP 数限制</b>：既限制订阅拉取入口的活跃 IP 与客户端设备数，又实时联动统计所选节点在各台中转机上的真实在线连接 IP/设备数，超限自动拦截！
+        </p>
+      </div>
+      <div class="cluster-hub-actions">
+        <button class="primary" data-action="add-subgrp">＋ 新建跨机组合订阅</button>
+        <button class="success" data-action="add-ext-node">🔗 导入外部独立节点链接</button>
+        <button data-action="open-aggregate-qr-modal">📱 全节点聚合二维码中心</button>
+      </div>
+    </section>
+
+    <section class="metrics-4">
+      <article class="metric" style="--accent:#2563eb">
+        <span>组合订阅套餐总数</span>
+        <strong>${groups.length} <small style="display:inline;font-size:13px;font-weight:700">个 (${activeGroupsCount} 有效)</small></strong>
+        <small>每个客户/套餐拥有独立 24 位随机安全 Token</small>
+      </article>
+      <article class="metric" style="--accent:#059669">
+        <span>跨机可选节点总池</span>
+        <strong>${candidates.length} <small style="display:inline;font-size:13px;font-weight:700">项 (${extNodes.length} 外部)</small></strong>
+        <small>涵盖全部中转机入站、子用户与外部节点链接</small>
+      </article>
+      <article class="metric" style="--accent:#d97706">
+        <span>当前跨机活跃 IP / 设备</span>
+        <strong>${totalOnlineIps} <small style="display:inline;font-size:13px;font-weight:700">IP · ${totalOnlineDevs} 设备</small></strong>
+        <small>实时汇总各中转机在线连接与订阅拉取设备</small>
+      </article>
+      <article class="metric" style="--accent:#7c3aed">
+        <span>累计拉取 / 超限拦截</span>
+        <strong>${totalPulls} <small style="display:inline;font-size:13px;font-weight:700">次拉取 · ${totalBlocked} 拦截</small></strong>
+        <small>主控订阅域名: ${esc(masterDomainHost)}</small>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <input class="search" id="subcenter-search" placeholder="搜索订阅名称、分组、备注或包含的节点..." value="${esc(state.subSearch || '')}">
+            <select id="subcenter-group-filter" style="width:150px;min-height:34px">
+              <option value="all"${selected('all', gf)}>全部分组 (${groups.length})</option>
+              ${distinctGroupNames.map((gn) => `<option value="${esc(gn)}"${selected(gn, gf)}>${esc(gn)}</option>`).join('')}
+            </select>
+            <select id="subcenter-status-filter" style="width:140px;min-height:34px">
+              <option value="all"${selected('all', sf)}>全部状态</option>
+              <option value="active"${selected('active', sf)}>正常有效</option>
+              <option value="disabled"${selected('disabled', sf)}>已停用</option>
+              <option value="expired"${selected('expired', sf)}>已到期</option>
+              <option value="exhausted"${selected('exhausted', sf)}>流量耗尽</option>
+            </select>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="primary" data-action="add-subgrp">＋ 新建跨机组合订阅</button>
+            <button data-action="bulk-subgrp" data-bulk="enable">✓ 批量启用</button>
+            <button data-action="bulk-subgrp" data-bulk="disable">⏸ 批量停用</button>
+            <button data-action="bulk-subgrp" data-bulk="renew-30d">⏱ 批量续期+30天</button>
+            <button data-action="bulk-subgrp" data-bulk="clear-access">🧹 批量清空设备绑定</button>
+            <button class="danger" data-action="bulk-subgrp" data-bulk="delete">🗑 批量删除</button>
+          </div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:38px"><input type="checkbox" data-action="toggle-all-subgrp" style="width:15px;min-height:15px"></th>
+              <th>组合订阅名称 / 分组 / Token</th>
+              <th>自由组合包含的跨机节点 (A机 + B机 + C机...)</th>
+              <th>状态</th>
+              <th>跨机累计流量 / 配额</th>
+              <th>连接设备数 / IP 数限制</th>
+              <th>到期时间</th>
+              <th style="text-align:right">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows || '<tr><td colspan="8"><div class="empty"><b>尚未创建自定义组合订阅</b><span>点击右上方「＋ 新建跨机组合订阅」，即可自由勾选 A 机、B 机、C 机的任意节点组合成专属订阅并限制连接设备/IP 数！</span></div></td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid-2">
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>外部独立节点池 (可选混编 · 共 ${extNodes.length} 个)</h2>
+            <p>支持批量粘贴导入未安装 Agent 的外部单节点链接 (VLESS/HY2/VMess/SS/Trojan/AnyTLS)，与本集群节点自由混编</p>
+          </div>
+          <button class="success" data-action="add-ext-node">＋ 批量导入外部节点</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th style="width:42px">#</th><th>节点名称 / 分组</th><th>协议</th><th>分享链接</th><th style="text-align:right">操作</th></tr></thead>
+            <tbody>
+              ${extRows || '<tr><td colspan="5"><div class="empty" style="min-height:80px"><b>暂无外部独立节点</b><span>本集群各中转机的节点已自动在新建组合订阅时列出；如有额外第三方节点链接可点击右上角导入</span></div></td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>订阅拉取与设备/IP 超限拦截审计日志</h2>
+            <p>实时记录每次客户端拉取订阅的公网 IP、设备型号/UA、输出格式及超限拦截原因</p>
+          </div>
+          <span class="tag tls">最近 ${logs.length} 条记录</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>组合订阅</th><th>结果</th><th>客户端 IP / 设备标识</th><th>格式</th><th>详情 / 拦截原因</th></tr></thead>
+            <tbody>
+              ${logRows || '<tr><td colspan="6"><div class="empty" style="min-height:80px"><b>暂无订阅访问记录</b><span>当客户端使用组合订阅链接拉取配置时，将在此实时显示 IP 与设备审计</span></div></td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+  `;
+}
+
+function openSubGroupModal(existing = null, preselectedKeys = null) {
+  const isEdit = Boolean(existing);
+  const candidates = state.subCandidateOptions && state.subCandidateOptions.length
+    ? state.subCandidateOptions
+    : (state.inbounds || []).filter((i) => i.protocol !== 'direct').map((i) => ({
+        key: i.id,
+        kind: 'inbound',
+        nodeId: i.nodeId || 'node_local',
+        nodeName: (i.nodeName || '主控本机').replace(/\s*\(Local Master\)/, ''),
+        nodeDomain: i.nodeDomain || '',
+        protocol: i.protocol,
+        port: i.port,
+        remark: i.remark,
+        enable: i.enable !== false
+      }));
+
+  const selectedSet = new Set(
+    preselectedKeys || (existing ? existing.selectedItems || [] : candidates.filter((c) => c.kind === 'inbound').map((c) => c.key))
+  );
+
+  const serverGroups = [...new Map(candidates.map((c) => [c.nodeId, { id: c.nodeId, name: c.nodeName, domain: c.nodeDomain }])).values()];
+  const expiryStr = toDatetimeLocalValue(existing?.expiryTime || 0);
+  const totalGB = existing ? Number(existing.totalGB || (existing.totalBytes ? Math.round((existing.totalBytes / (1024 ** 3)) * 100) / 100 : 0)) : 0;
+
+  const pickerItemsHtml = candidates.map((c) => {
+    const isChecked = selectedSet.has(c.key);
+    const searchStr = `${c.nodeName} ${c.nodeDomain} ${c.remark} ${c.protocol} ${c.port}`.toLowerCase();
+    const kindBadge = c.kind === 'client' ? '<span class="tag tls" style="font-size:10px">子用户</span>' : (c.kind === 'external' ? '<span class="tag relay" style="font-size:10px">外部</span>' : `<span class="tag" style="font-size:10px">:${c.port}</span>`);
+    return `
+      <label class="subgrp-picker-item" data-node="${esc(c.nodeId)}" data-search="${esc(searchStr)}" style="display:flex;align-items:center;gap:8px;padding:8px 11px;border-radius:9px;border:1px solid var(--line);background:var(--surface-soft);cursor:pointer;font-size:12.5px">
+        <input type="checkbox" name="selectedItems" value="${esc(c.key)}" style="width:16px;min-height:16px" ${isChecked ? 'checked' : ''}>
+        <div style="min-width:0;flex:1">
+          <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
+            <b style="color:var(--primary)">[${esc(c.nodeName)}]</b>
+            <strong>${esc(c.remark)}</strong>
+            <span class="tag" style="font-size:10px">${esc(c.protocol.toUpperCase())}</span>
+            ${kindBadge}
+          </div>
+          <small class="muted" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">节点连接域名/地址: <code>${esc(c.nodeDomain || '自动匹配')}</code></small>
+        </div>
+      </label>
+    `;
+  }).join('');
+
+  openModal(
+    isEdit ? `编辑跨机组合订阅 · ${existing.name}` : '新建跨机自由组合订阅 (A机 + B机 + C机任意节点组合)',
+    '订阅链接统一使用主控域名，订阅内下发的节点自动使用各中转机独立域名，并支持限制连接设备/IP 数',
+    `
+    <form id="subgrp-form" data-id="${esc(existing?.id || '')}" class="form-grid">
+      <label>
+        组合订阅名称 (必填 · 如客户名或套餐名)
+        <input name="name" value="${esc(existing?.name || '')}" placeholder="例如：VIP客户张总 · 港日美三线组合" required>
+      </label>
+      <label>
+        所属分组标签
+        <input name="groupName" value="${esc(existing?.groupName || 'VIP客户组')}" placeholder="例如：VIP客户组 / 外贸专线组" required>
+      </label>
+
+      <div class="section-title">一、连接设备数限制、公网 IP 限制、流量配额与到期时间</div>
+      <label>
+        限制同时在线/拉取公网 IP 数 (0 = 不限制)
+        <input name="ipLimit" type="number" min="0" max="5000" value="${esc(existing?.ipLimit ?? 3)}" placeholder="0 表示不限制 IP 数">
+        <small>同时汇总各中转机实连 IP 与活跃窗口内拉取 IP，超限自动拦截</small>
+      </label>
+      <label>
+        限制同时在线/拉取设备台数 (0 = 不限制)
+        <input name="deviceLimit" type="number" min="0" max="5000" value="${esc(existing?.deviceLimit ?? 5)}" placeholder="0 表示不限制设备数">
+        <small>结合节点并发连接设备数与客户端 Device-ID / User-Agent 识别</small>
+      </label>
+      <label>
+        组合订阅总流量配额 (GB，0 = 不限流量)
+        <input name="totalGB" type="number" min="0" step="0.5" value="${esc(totalGB)}" placeholder="0 表示不限制总流量">
+        <small>自动累加所选 A/B/C 机节点的上下行流量，达到配额自动停止下发</small>
+      </label>
+      <label>
+        订阅到期时间 (留空 = 永久有效)
+        <div class="input-row">
+          <input name="expiryTime" id="subgrp-expiry-input" type="datetime-local" value="${esc(expiryStr)}">
+          <button type="button" data-action="subgrp- preset-30d">+30天</button>
+          <button type="button" data-action="subgrp-clear-expiry">永久</button>
+        </div>
+      </label>
+      <label>
+        IP/设备活跃绑定窗口 (小时，默认 24h)
+        <input name="accessWindowHours" type="number" min="1" max="720" value="${esc(existing?.accessWindowHours || 24)}">
+      </label>
+      <label style="justify-content:center">
+        <span>节点实连级限制同步与启用状态</span>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-top:4px">
+          <label style="flex-direction:row;align-items:center;gap:6px;font-weight:500">
+            <input type="checkbox" name="syncNodeLimits" style="width:15px;min-height:15px" ${existing?.syncNodeLimits !== false ? 'checked' : ''}>
+            <span>同步将 IP/设备限制下发到所选单用户节点内核 (Sing-box 实连级拦截)</span>
+          </label>
+          <label style="flex-direction:row;align-items:center;gap:6px;font-weight:500">
+            <input type="checkbox" name="enabled" style="width:15px;min-height:15px" ${existing?.enabled !== false ? 'checked' : ''}>
+            <span>立即启用此组合订阅</span>
+          </label>
+        </div>
+      </label>
+
+      <div class="section-title">二、跨服务器自由勾选要纳入此订阅的节点 (支持 A机 + B机 + C机 + 外部节点混编)</div>
+      <div class="wide">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;flex:1">
+            <input id="subgrp-picker-search" placeholder="搜索服务器名称、域名、节点备注或端口..." style="max-width:260px;min-height:32px">
+            <select id="subgrp-picker-node" style="width:185px;min-height:32px">
+              <option value="all">🌐 全部服务器 (${candidates.length})</option>
+              ${serverGroups.map((sg) => `<option value="${esc(sg.id)}">🖥 ${esc(sg.name)}${sg.domain ? ` (${esc(sg.domain)})` : ''}</option>`).join('')}
+            </select>
+          </div>
+          <div style="display:flex;gap:6px">
+            <button type="button" id="subgrp-select-visible">☑ 全选当前筛选结果</button>
+            <button type="button" id="subgrp-clear-all">清空全选</button>
+          </div>
+        </div>
+        <div id="subgrp-picker-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:8px;max-height:280px;overflow-y:auto;padding:6px;border:1px solid var(--line);border-radius:10px;background:var(--surface)">
+          ${pickerItemsHtml || '<div class="empty" style="grid-column:1/-1;min-height:80px"><b>暂无可选节点</b><span>请先在《入站节点管理》创建节点或在下方粘贴外部链接</span></div>'}
+        </div>
+      </div>
+
+      <label class="wide">
+        额外混编自定义节点链接 (选填 · 每行一条 vless:// / hy2:// / vmess:// / ss:// / trojan:// 链接)
+        <textarea name="customUris" style="min-height:64px" placeholder="如需在此组合订阅中额外附带其他机器的节点链接，可直接在此每行粘贴一条">${esc((existing?.customUris || []).join('\n'))}</textarea>
+      </label>
+
+      <label class="wide">
+        管理员备注 (选填 · 仅面板内可见)
+        <input name="notes" value="${esc(existing?.notes || '')}" placeholder="例如：客户微信号、续费日期或专线备注">
+      </label>
+
+      <div class="form-actions">
+        <button type="button" data-close>取消</button>
+        <button type="submit" class="primary">${isEdit ? '保存组合订阅修改' : '立即创建跨机组合订阅'}</button>
+      </div>
+    </form>
+    `
+  );
+
+  const filterPicker = () => {
+    const qVal = ($('#subgrp-picker-search')?.value || '').trim().toLowerCase();
+    const nVal = $('#subgrp-picker-node')?.value || 'all';
+    $$('.subgrp-picker-item').forEach((el) => {
+      const matchNode = nVal === 'all' || el.dataset.node === nVal;
+      const matchSearch = !qVal || (el.dataset.search || '').includes(qVal);
+      el.style.display = (matchNode && matchSearch) ? 'flex' : 'none';
+    });
+  };
+  $('#subgrp-picker-search')?.addEventListener('input', filterPicker);
+  $('#subgrp-picker-node')?.addEventListener('change', filterPicker);
+  $('#subgrp-select-visible')?.addEventListener('click', () => {
+    $$('.subgrp-picker-item').forEach((el) => {
+      if (el.style.display !== 'none') {
+        const chk = el.querySelector('input[type="checkbox"]');
+        if (chk) chk.checked = true;
+      }
+    });
+  });
+  $('#subgrp-clear-all')?.addEventListener('click', () => {
+    $$('#subgrp-picker-grid input[type="checkbox"]').forEach((chk) => { chk.checked = false; });
+  });
+}
+
+function openSubGroupLinksModal(subGroup) {
+  if (!subGroup) return;
+  const urls = subGroup.urls || {};
+  const resolvedItems = subGroup.resolvedItems || [];
+  const allUris = resolvedItems.map((x) => x.uri).filter(Boolean).join('\n');
+
+  const formatCards = [
+    { id: 'auto', title: '智能自动识别订阅 (推荐)', badge: 'Auto UA', desc: '根据客户端自动返回 Base64 / Clash / Sing-box / Surge', url: urls.autoUrl },
+    { id: 'b64', title: '通用 Base64 订阅', badge: 'Base64', desc: 'v2rayN / v2rayNG / Shadowrocket / NekoBox / PassWall', url: urls.base64Url },
+    { id: 'clash', title: 'Clash Meta / Verge 智能分流', badge: 'Clash', desc: '内置 AI 专线 / Google 外贸 / 自动测速分组', url: urls.clashUrl },
+    { id: 'sb', title: 'Sing-box JSON 订阅', badge: 'Sing-box', desc: 'SFI / SFA / SFM / Sing-box 客户端直接导入', url: urls.singboxUrl },
+    { id: 'surge', title: 'Surge 配置订阅', badge: 'Surge', desc: 'iOS / macOS Surge 自动策略组配置', url: urls.surgeUrl },
+    { id: 'vault', title: 'SubVault 兼容短链 (/s/Token/auto)', badge: 'SubVault', desc: '兼容原 SubVault 订阅路径格式', url: urls.vaultAutoUrl }
+  ];
+
+  openModal(
+    `📦 组合订阅分发中心 · ${subGroup.name}`,
+    `包含 ${resolvedItems.length} 个跨机节点 · IP限制: ${subGroup.ipLimit || '不限'} · 设备限制: ${subGroup.deviceLimit || '不限'}`,
+    `
+    <div class="stack">
+      <div class="notice">
+        <b>🌐 主控域名统一订阅入口</b>：下方所有订阅链接均使用主控域名，客户端只需导入一次；当你后续在面板中为该组合增删 A/B/C 机的节点或切换容灾 IP 时，客户端更新订阅即可自动同步！
+      </div>
+
+      <div class="qr-wall-grid">
+        ${formatCards.map((c) => `
+          <div class="qr-wall-card">
+            <div class="qr-wall-head">
+              <strong>${esc(c.title)}</strong>
+              <span class="tag tls">${esc(c.badge)}</span>
+            </div>
+            <div class="qr-wall-sub">${esc(c.desc)}</div>
+            <code style="font-size:11px;color:var(--primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.url || '')}</code>
+            <div class="qr-wall-actions">
+              <button class="primary" data-copy="${esc(c.url || '')}">📋 复制订阅链接</button>
+              <button data-qr-inline="sg-qr-${c.id}" data-qr-text="${esc(c.url || '')}">📱 展开二维码</button>
+            </div>
+            <div id="sg-qr-${c.id}" class="subscription-qr hidden"></div>
+          </div>
+        `).join('')}
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:6px">
+        <div class="section-title" style="margin:0;flex:1">本组合内包含的跨机单节点明细 (共 ${resolvedItems.length} 条)</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${allUris ? `<button class="primary" data-copy="${esc(allUris)}">📋 一键复制本组合全部单节点链接 (${resolvedItems.length} 条)</button>` : ''}
+          <button class="danger" data-action="subgrp-action" data-sub-act="rotate-token" data-id="${esc(subGroup.id)}">🔄 重置更换 Token (使旧链接失效)</button>
+        </div>
+      </div>
+
+      <div class="qr-wall-grid">
+        ${resolvedItems.map((it, idx) => `
+          <div class="qr-wall-card">
+            <div class="qr-wall-head">
+              <strong>${esc(it.name)}</strong>
+              <span class="tag">${esc((it.protocol || 'vless').toUpperCase())}</span>
+            </div>
+            <div class="qr-wall-sub">
+              <span class="tag relay">🖥 所属机器: ${esc(it.nodeName)}${it.nodeDomain ? ` (${esc(it.nodeDomain)})` : ''}</span>
+            </div>
+            <div class="qr-wall-actions">
+              <button class="primary" data-copy="${esc(it.uri)}">📋 复制单节点</button>
+              <button data-qr-inline="sg-item-qr-${idx}" data-qr-text="${esc(it.uri)}">📱 二维码</button>
+            </div>
+            <div id="sg-item-qr-${idx}" class="subscription-qr hidden"></div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    `
+  );
+}
+
+function openSubGroupAccessModal(subGroup) {
+  if (!subGroup) return;
+  const st = subGroup.stats || {};
+  const liveIps = st.liveOnlineIps || [];
+  const accessKeys = subGroup.accessKeys || [];
+
+  const keyRows = accessKeys.map((k) => `
+    <tr>
+      <td><span class="tag ${k.kind === 'ip' ? 'tls' : 'relay'}">${k.kind === 'ip' ? '🌐 访问 IP' : '📱 客户端设备'}</span></td>
+      <td><code>${esc(k.label)}</code></td>
+      <td><small>${fmtDateTime(k.firstSeenAt)}</small></td>
+      <td><small>${fmtDateTime(k.lastSeenAt)}</small></td>
+      <td><b>${k.hits || 1} 次</b></td>
+    </tr>
+  `).join('');
+
+  openModal(
+    `👁 连接设备与活跃 IP 监控 · ${subGroup.name}`,
+    `IP 限制: ${st.combinedIpCount || 0} / ${subGroup.ipLimit || '∞'} · 设备限制: ${st.combinedDeviceCount || 0} / ${subGroup.deviceLimit || '∞'} (窗口: ${subGroup.accessWindowHours || 24} 小时)`,
+    `
+    <div class="stack">
+      <div class="notice">
+        <b>🔗 跨机节点实连活跃公网 IP (${liveIps.length} 个)</b>：${liveIps.length ? liveIps.map((ip) => `<code>${esc(ip)}</code>`).join(' 、 ') : '当前暂无实时活跃代理连接'}
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>类型</th><th>IP 地址 / 客户端设备标识 (User-Agent / Device-ID)</th><th>首次记录时间</th><th>最后活跃时间</th><th>累计拉取</th></tr></thead>
+          <tbody>
+            ${keyRows || '<tr><td colspan="5"><div class="empty" style="min-height:80px"><b>暂无已绑定的拉取 IP 或设备记录</b><span>当客户端拉取此组合订阅后将自动记录并执行上限保护</span></div></td></tr>'}
+          </tbody>
+        </table>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="danger" data-action="subgrp-action" data-sub-act="clear-access" data-id="${esc(subGroup.id)}">🧹 一键清空已绑定 IP 与设备记录 (解除锁定)</button>
+        <button type="button" data-close>关闭</button>
+      </div>
+    </div>
+    `
+  );
+}
+
+function openExternalNodeModal() {
+  openModal(
+    '🔗 批量导入外部独立节点链接',
+    '支持将未安装 Agent 的第三方服务器单节点链接导入组合订阅池，与本集群节点自由混编',
+    `
+    <form id="ext-node-form" class="form-grid">
+      <label>
+        自定义节点名称前缀 (选填 · 留空则自动使用链接 # 后的备注名)
+        <input name="name" placeholder="例如：香港BGP专线">
+      </label>
+      <label>
+        所属分组名称
+        <input name="groupName" value="外部专线" required>
+      </label>
+      <label class="wide">
+        粘贴节点分享链接 (每行一条，支持 vless://, vmess://, hy2://, trojan://, ss://, anytls://, tuic://)
+        <textarea name="uris" style="min-height:140px" placeholder="vless://uuid@host:port?security=reality...#香港节点01\nhysteria2://pass@host:port?sni=...#日本HY2" required></textarea>
+      </label>
+      <div class="form-actions">
+        <button type="button" data-close>取消</button>
+        <button type="submit" class="primary">立即解析并导入节点池</button>
+      </div>
+    </form>
+    `
+  );
+}
+
 function renderMigrate() {
   const preview = state.migrationPreview;
   const previewHtml = preview ? `
@@ -2338,6 +2918,7 @@ function render() {
     inbounds: renderInbounds,
     routing: renderRouting,
     outbounds: renderOutbounds,
+    subcenter: renderSubCenter,
     migrate: renderMigrate,
     certificates: renderCertificates,
     settings: renderSettings,
@@ -3282,6 +3863,162 @@ function openAggregateQrModal(filterNodeId = null) {
   const nf = state.aggQrNodeFilter || 'all';
   const nodes = state.nodes && state.nodes.length ? state.nodes : [{ id: 'node_local', name: '主控本机 (Local Master)', role: 'relay', domain: state.settings?.webDomain || '' }];
   const selectedNodeObj = nf !== 'all' ? nodes.find((n) => n.id === nf) : null;
+
+  const allEnabledInbounds = state.inbounds.filter((i) => i.enable !== false && i.protocol !== 'direct');
+  if (!state.aggSelectedKeys || !(state.aggSelectedKeys instanceof Set)) {
+    state.aggSelectedKeys = new Set(allEnabledInbounds.map((i) => i.id));
+  }
+
+  const visibleInbounds = nf === 'all'
+    ? allEnabledInbounds
+    : allEnabledInbounds.filter((i) => (i.nodeId || 'node_local') === nf);
+
+  const checkedInbounds = allEnabledInbounds.filter((i) => state.aggSelectedKeys.has(i.id));
+  const isCustomSubset = checkedInbounds.length > 0 && checkedInbounds.length < allEnabledInbounds.length;
+  const itemsQuery = isCustomSubset ? `items=${encodeURIComponent(checkedInbounds.map((i) => i.id).join(','))}` : (nf !== 'all' ? `node=${encodeURIComponent(nf)}` : '');
+
+  const scopeLabel = isCustomSubset
+    ? `自定义跨机勾选组合 (已选 ${checkedInbounds.length} / ${allEnabledInbounds.length} 个节点)`
+    : (selectedNodeObj ? `[${selectedNodeObj.name.replace(/\s*\(Local Master\)/, '')}${selectedNodeObj.domain ? ` · ${selectedNodeObj.domain}` : ''}]` : '全部服务器聚合');
+
+  const baseSubUrl = getBaseSubscriptionUrl();
+  const joinQ = (base, extra) => {
+    const qParts = [itemsQuery, extra].filter(Boolean).join('&');
+    return qParts ? `${base}?${qParts}` : base;
+  };
+  const allSubUrl = joinQ(baseSubUrl, '');
+  const clashSubUrl = joinQ(baseSubUrl, 'format=clash');
+  const singboxSubUrl = joinQ(baseSubUrl, 'format=singbox');
+
+  const activeForLinks = isCustomSubset ? checkedInbounds : visibleInbounds;
+  const flatLinks = activeForLinks.flatMap((inb) => (inb.links || []).map((l) => ({ inb, l })));
+  const allUrisText = flatLinks.map(({ l }) => l.uri).filter(Boolean).join('\n');
+
+  const allNodeCards = visibleInbounds
+    .flatMap((inb) => (inb.links || []).map((l) => ({ inb, l })))
+    .map(({ inb, l }, idx) => {
+      const ownerNode = nodes.find((n) => n.id === (inb.nodeId || 'node_local'));
+      const srvName = (ownerNode?.name || inb.nodeName || '主控本机').replace(/\s*\(Local Master\)/, '');
+      const srvDomain = ownerNode?.domain || inb.nodeDomain || ownerNode?.host || '';
+      const rolePrefix = ownerNode?.role === 'exit' ? '落地' : '中转';
+      const isChecked = state.aggSelectedKeys.has(inb.id);
+      return `
+      <div class="qr-wall-card" style="${isChecked ? 'border-color:var(--primary)' : 'opacity:0.65'}">
+        <div class="qr-wall-head">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;flex:1;min-width:0">
+            <input type="checkbox" class="agg-node-check" data-id="${esc(inb.id)}" style="width:15px;min-height:15px" ${isChecked ? 'checked' : ''}>
+            <strong title="${esc(l.name)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.name)}</strong>
+          </label>
+          <span class="tag">${esc(inb.protocol.toUpperCase())} :${inb.port}</span>
+        </div>
+        <div class="qr-wall-sub" style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap">
+          <span class="tag ${ownerNode?.role === 'exit' ? 'tls' : 'relay'}" style="font-size:10.5px">🖥 ${rolePrefix}: ${esc(srvName)}${srvDomain ? ` (${esc(srvDomain)})` : ''}</span>
+          ${l.clientName ? `<small class="muted">用户: ${esc(l.clientName)}</small>` : ''}
+        </div>
+        <div class="qr-wall-actions">
+          <button class="primary" data-copy="${esc(l.uri)}">📋 复制链接</button>
+          <button data-qr-inline="wall-qr-${idx}" data-qr-text="${esc(l.uri)}">📱 展开二维码</button>
+        </div>
+        <div id="wall-qr-${idx}" class="subscription-qr hidden"></div>
+      </div>
+    `;
+    })
+    .join('');
+
+  openModal(
+    '全节点聚合订阅与跨机自由勾选二维码中心',
+    `${scopeLabel} · 当前组合共 ${flatLinks.length} 条连接`,
+    `
+    <div class="stack">
+      <div class="node-filter-bar" style="margin-bottom:4px;justify-content:space-between">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span style="font-size:12px;font-weight:750;color:var(--muted);margin-right:4px">🖥 按服务器查看或自由勾选组合:</span>
+          <button type="button" class="filter-pill ${nf === 'all' ? 'active' : ''}" data-action="filter-agg-qr-node" data-node="all">🌐 全部服务器 (${allEnabledInbounds.length})</button>
+          ${nodes.filter((n) => n.role !== 'standby').map((n) => {
+            const cnt = allEnabledInbounds.filter((i) => (i.nodeId || 'node_local') === n.id).length;
+            const rTag = n.role === 'exit' ? '[落地]' : '[中转]';
+            return `<button type="button" class="filter-pill ${nf === n.id ? 'active' : ''}" data-action="filter-agg-qr-node" data-node="${esc(n.id)}">${rTag} ${esc(n.name.replace(/\s*\(Local Master\)/, ''))}${n.domain ? ` (${esc(n.domain)})` : ''} (${cnt})</button>`;
+          }).join('')}
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button type="button" data-action="agg-select-all">☑ 全选全部节点</button>
+          <button type="button" class="primary" data-action="save-agg-as-subgrp">💾 将当前勾选保存为独立客户组合订阅 (可限设备/IP数)</button>
+        </div>
+      </div>
+
+      <div class="section-title" style="margin-top:0">一、聚合订阅链接 — 当前范围：${esc(scopeLabel)} (主控域名入口，支持在下方勾选任意机器节点动态组合)</div>
+      <div class="qr-wall-grid">
+        <div class="qr-wall-card">
+          <div class="qr-wall-head">
+            <strong>通用 Base64 聚合订阅</strong>
+            <span class="tag">Base64</span>
+          </div>
+          <div class="qr-wall-sub">v2rayN / Shadowrocket / v2rayNG / NekoBox</div>
+          <code style="font-size:11px;color:var(--primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(allSubUrl)}</code>
+          <div class="qr-wall-actions">
+            <button class="primary" data-copy="${esc(allSubUrl)}">📋 复制通用订阅</button>
+            <button data-qr-inline="agg-qr-b64" data-qr-text="${esc(allSubUrl)}">📱 展开二维码</button>
+          </div>
+          <div id="agg-qr-b64" class="subscription-qr hidden"></div>
+        </div>
+
+        <div class="qr-wall-card">
+          <div class="qr-wall-head">
+            <strong>Clash / Mihomo 智能分流</strong>
+            <span class="tag tls">Clash</span>
+          </div>
+          <div class="qr-wall-sub">内置 AI 专线 / 外贸 Google / 自动测速策略组</div>
+          <code style="font-size:11px;color:var(--primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(clashSubUrl)}</code>
+          <div class="qr-wall-actions">
+            <button class="primary" data-copy="${esc(clashSubUrl)}">📋 复制 Clash 订阅</button>
+            <button data-qr-inline="agg-qr-clash" data-qr-text="${esc(clashSubUrl)}">📱 展开二维码</button>
+          </div>
+          <div id="agg-qr-clash" class="subscription-qr hidden"></div>
+        </div>
+
+        <div class="qr-wall-card">
+          <div class="qr-wall-head">
+            <strong>Sing-box JSON 聚合订阅</strong>
+            <span class="tag relay">Sing-box</span>
+          </div>
+          <div class="qr-wall-sub">SFI / SFA / SFM 客户端直接导入</div>
+          <code style="font-size:11px;color:var(--primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(singboxSubUrl)}</code>
+          <div class="qr-wall-actions">
+            <button class="primary" data-copy="${esc(singboxSubUrl)}">📋 复制 Sing-box 订阅</button>
+            <button data-qr-inline="agg-qr-sb" data-qr-text="${esc(singboxSubUrl)}">📱 展开二维码</button>
+          </div>
+          <div id="agg-qr-sb" class="subscription-qr hidden"></div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:6px">
+        <div class="section-title" style="margin:0;flex:1">二、勾选跨机单节点组合与独立二维码 (${esc(scopeLabel)} · 已选 ${flatLinks.length} 条连接)</div>
+        ${allUrisText ? `<button class="primary" data-copy="${esc(allUrisText)}">📋 一键复制当前已勾选全部节点链接 (${flatLinks.length} 条)</button>` : ''}
+      </div>
+
+      <div class="qr-wall-grid">
+        ${allNodeCards || '<div class="empty"><b>当前没有已启用的节点</b></div>'}
+      </div>
+    </div>
+    `
+  );
+
+  $$('.agg-node-check').forEach((chk) => {
+    chk.addEventListener('change', () => {
+      const id = chk.dataset.id;
+      if (chk.checked) state.aggSelectedKeys.add(id);
+      else state.aggSelectedKeys.delete(id);
+      openAggregateQrModal();
+    });
+  });
+}
+function _legacyOpenAggregateQrModalUnused(filterNodeId = null) {
+  if (filterNodeId !== null) {
+    state.aggQrNodeFilter = filterNodeId;
+  }
+  const nf = state.aggQrNodeFilter || 'all';
+  const nodes = state.nodes && state.nodes.length ? state.nodes : [{ id: 'node_local', name: '主控本机 (Local Master)', role: 'relay', domain: state.settings?.webDomain || '' }];
+  const selectedNodeObj = nf !== 'all' ? nodes.find((n) => n.id === nf) : null;
   const scopeLabel = selectedNodeObj ? `[${selectedNodeObj.name.replace(/\s*\(Local Master\)/, '')}${selectedNodeObj.domain ? ` · ${selectedNodeObj.domain}` : ''}]` : '全部服务器聚合';
 
   const baseSubUrl = getBaseSubscriptionUrl();
@@ -4000,6 +4737,98 @@ document.addEventListener('click', async (e) => {
 
   try {
     if (action === 'jump-migrate') { setPage('migrate'); }
+
+
+    else if (action === 'agg-select-all') {
+      const allEnabled = (state.inbounds || []).filter((i) => i.enable !== false && i.protocol !== 'direct');
+      state.aggSelectedKeys = new Set(allEnabled.map((i) => i.id));
+      openAggregateQrModal();
+    }
+    else if (action === 'save-agg-as-subgrp') {
+      const keys = state.aggSelectedKeys ? [...state.aggSelectedKeys] : [];
+      openSubGroupModal(null, keys);
+    }
+    else if (action === 'add-subgrp') {
+      if (!state.subCandidateOptions?.length) {
+        try {
+          const d = await api('/api/subcenter');
+          state.subCandidateOptions = d.candidateOptions || [];
+          state.subGroups = d.subGroups || [];
+        } catch {}
+      }
+      openSubGroupModal(null);
+    }
+    else if (action === 'edit-subgrp') {
+      const sg = (state.subGroups || []).find((x) => x.id === btn.dataset.id);
+      if (sg) openSubGroupModal(sg);
+    }
+    else if (action === 'subgrp-links') {
+      const sg = (state.subGroups || []).find((x) => x.id === btn.dataset.id);
+      if (sg) openSubGroupLinksModal(sg);
+    }
+    else if (action === 'subgrp-access') {
+      const sg = (state.subGroups || []).find((x) => x.id === btn.dataset.id);
+      if (sg) openSubGroupAccessModal(sg);
+    }
+    else if (action === 'delete-subgrp') {
+      const sg = (state.subGroups || []).find((x) => x.id === btn.dataset.id);
+      openConfirmModal('删除组合订阅', `确定要删除组合订阅 [${sg?.name || btn.dataset.id}] 吗？删除后该订阅链接将立即失效（不影响原机器上的节点本身）。`, async () => {
+        await api(`/api/subcenter/groups/${btn.dataset.id}`, { method: 'DELETE' });
+        toast('组合订阅已删除');
+        load('subcenter');
+      });
+    }
+    else if (action === 'subgrp-action') {
+      const subAct = btn.dataset.subAct;
+      const res = await api(`/api/subcenter/groups/${btn.dataset.id}/action`, {
+        method: 'POST',
+        body: JSON.stringify({ action: subAct })
+      });
+      const msgMap = {
+        'rotate-token': '已重新生成 24 位订阅 Token，旧订阅链接已立即失效！',
+        'reset-traffic': '该组合订阅的累计流量统计已清零！',
+        'clear-access': '已清空该组合订阅的活跃 IP 与设备绑定记录！',
+        'toggle': '已切换组合订阅启用状态！'
+      };
+      toast(msgMap[subAct] || '操作成功');
+      await load('subcenter', { silent: true });
+      if (subAct === 'rotate-token' && res.subGroup) openSubGroupLinksModal(res.subGroup);
+      else if (subAct === 'clear-access' && res.subGroup) openSubGroupAccessModal(res.subGroup);
+    }
+    else if (action === 'toggle-all-subgrp') {
+      const checked = btn.checked;
+      $$('.subgrp-check').forEach((c) => { c.checked = checked; });
+    }
+    else if (action === 'bulk-subgrp') {
+      const ids = $$('.subgrp-check:checked').map((c) => c.value);
+      if (!ids.length) {
+        toast('请先在表格左侧勾选至少 1 个组合订阅', true);
+        return;
+      }
+      const bulkAct = btn.dataset.bulk;
+      const res = await api('/api/subcenter/groups/bulk', {
+        method: 'POST',
+        body: JSON.stringify({ ids, action: bulkAct })
+      });
+      toast(`已批量处理 ${res.affected || ids.length} 个组合订阅`);
+      load('subcenter');
+    }
+    else if (action === 'subgrp- preset-30d' || action === 'subgrp-preset-30d') {
+      const inp = $('#subgrp-expiry-input');
+      if (inp) inp.value = toDatetimeLocalValue(Date.now() + 30 * 86400 * 1000);
+    }
+    else if (action === 'subgrp-clear-expiry') {
+      const inp = $('#subgrp-expiry-input');
+      if (inp) inp.value = '';
+    }
+    else if (action === 'add-ext-node') {
+      openExternalNodeModal();
+    }
+    else if (action === 'delete-ext-node') {
+      await api(`/api/subcenter/external-nodes/${btn.dataset.id}`, { method: 'DELETE' });
+      toast('外部节点已删除');
+      load('subcenter');
+    }
 
     else if (action === 'jump-settings') {
       setPage('settings');
@@ -4856,6 +5685,29 @@ document.addEventListener('change', async (e) => {
 });
 
 document.addEventListener('input', (e) => {
+
+  if (e.target.id === 'subcenter-search') {
+    state.subSearch = e.target.value;
+    const pos = e.target.selectionStart;
+    render();
+    const nextInput = $('#subcenter-search');
+    if (nextInput) {
+      nextInput.focus();
+      try { nextInput.setSelectionRange(pos, pos); } catch {}
+    }
+    return;
+  }
+  if (e.target.id === 'subcenter-group-filter') {
+    state.subGroupFilter = e.target.value;
+    render();
+    return;
+  }
+  if (e.target.id === 'subcenter-status-filter') {
+    state.subStatusFilter = e.target.value;
+    render();
+    return;
+  }
+
   if (e.target.matches('[data-search]')) {
     state.search = e.target.value;
     const pos = e.target.selectionStart;
@@ -5123,6 +5975,49 @@ document.addEventListener('submit', async (e) => {
       toast('自定义证书已保存并绑定！');
       load('certificates');
     }
+
+    else if (form.id === 'subgrp-form') {
+      const id = form.dataset.id;
+      const selectedItems = Array.from(form.querySelectorAll('input[name="selectedItems"]:checked')).map((el) => el.value);
+      const payload = {
+        name: data.name,
+        groupName: data.groupName,
+        ipLimit: Number(data.ipLimit || 0),
+        deviceLimit: Number(data.deviceLimit || 0),
+        totalGB: Number(data.totalGB || 0),
+        expiryTime: data.expiryTime ? new Date(data.expiryTime).getTime() : 0,
+        accessWindowHours: Number(data.accessWindowHours || 24),
+        syncNodeLimits: Boolean(form.querySelector('[name="syncNodeLimits"]')?.checked),
+        enabled: Boolean(form.querySelector('[name="enabled"]')?.checked),
+        selectedItems,
+        customUris: data.customUris || '',
+        notes: data.notes || ''
+      };
+      const res = await api(id ? `/api/subcenter/groups/${id}` : '/api/subcenter/groups', {
+        method: id ? 'PUT' : 'POST',
+        body: JSON.stringify(payload)
+      });
+      closeModal();
+      toast(id ? '组合订阅已更新！' : '跨机组合订阅已创建！');
+      if (state.page === 'subcenter') {
+        await load('subcenter');
+      } else {
+        setPage('subcenter');
+      }
+      if (!id && res.subGroup) {
+        openSubGroupLinksModal(res.subGroup);
+      }
+    }
+    else if (form.id === 'ext-node-form') {
+      const res = await api('/api/subcenter/external-nodes', {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+      closeModal();
+      toast(`已成功导入 ${res.count || 1} 个外部独立节点！`);
+      load('subcenter');
+    }
+
     else if (form.id === 'settings-form') {
       const takeoverSel = data.masterAutoTakeoverSelect || 'manual';
       const payload = {

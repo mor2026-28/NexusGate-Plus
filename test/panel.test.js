@@ -3310,3 +3310,183 @@ test('27. v1.0.6 Full-Stack Zero-to-End Audit: 10 Distinct-Domain Relays (30 Cli
   await req(`/SecPath16Chars99/api/cluster/nodes/${exitNodeId}`, { method: 'DELETE' });
   await req(`/SecPath16Chars99/api/cluster/nodes/${sharedStandbyId}`, { method: 'DELETE' });
 });
+
+test('28. v1.0.7 Custom Multi-Node Subscription Center (SubVault) E2E: Free Cross-Machine Node Combination (Relay A + Relay B + Relay C + External URI), Master Domain Sub URL vs Per-Relay Node Domains, IP & Device Limit Enforcement, Token Rotation & Full .zip Disaster Recovery', async () => {
+  // 1. Set up 3 Relay Servers with distinct domains (Relay A: hk-a.nexus.vip, Relay B: jp-b.nexus.vip, Relay C: us-c.nexus.vip)
+  //    and set Master Panel domain to master-sub.nexus.vip
+  store.transact((st) => {
+    st.settings.webDomain = 'master-sub.nexus.vip';
+  });
+
+  const relayDomains = ['hk-a.nexus.vip', 'jp-b.nexus.vip', 'us-c.nexus.vip'];
+  const relayNodeIds = [];
+  const createdInboundIds = [];
+
+  for (let i = 0; i < 3; i += 1) {
+    const rRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: `SubTest-中转机-${String.fromCharCode(65 + i)}`,
+        role: 'relay',
+        host: `198.51.100.${50 + i}`,
+        domain: relayDomains[i]
+      })
+    });
+    assert.equal(rRes.status, 201);
+    const nId = rRes.json.node.id;
+    relayNodeIds.push(nId);
+
+    // Create 2 inbounds on each Relay server (only 1 of the 2 will be picked for our custom subscription group!)
+    for (let k = 1; k <= 2; k += 1) {
+      const inbRes = await req('/SecPath16Chars99/api/inbounds', {
+        method: 'POST',
+        body: JSON.stringify({
+          nodeId: nId,
+          remark: `Node-${String.fromCharCode(65 + i)}-${k}`,
+          protocol: k === 1 ? 'vless' : 'hysteria2',
+          port: 31000 + i * 10 + k,
+          security: k === 1 ? 'reality' : 'tls',
+          tlsDomain: relayDomains[i]
+        })
+      });
+      assert.equal(inbRes.status, 201);
+      if (k === 1) {
+        createdInboundIds.push(inbRes.json.inbound.id);
+      }
+    }
+  }
+
+  // 2. Import an External Standalone Node into the External Node Pool
+  const extRes = await req('/SecPath16Chars99/api/subcenter/external-nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      groupName: '香港外部BGP',
+      uris: 'ss://YWVzLTEyOC1nY206StrongPass123456@203.0.113.88:18388#HK-External-SS'
+    })
+  });
+  assert.equal(extRes.status, 201);
+  const extNodeId = extRes.json.items[0].id;
+
+  // 3. Test Ad-hoc Multi-Node Selection on Aggregate Subscription Endpoint (?items=...)
+  const aggTok = store.state.settings.subToken;
+  const adhocRes = await req(`/sub/${aggTok}?format=raw&items=${encodeURIComponent(`${createdInboundIds[0]},${createdInboundIds[2]}`)}`);
+  assert.equal(adhocRes.status, 200);
+  const adhocLines = adhocRes.text.trim().split('\n').filter(Boolean);
+  assert.equal(adhocLines.length, 2, 'Ad-hoc ?items=... filter on aggregate subscription must return only the 2 selected nodes');
+  assert.ok(adhocLines.some((l) => l.includes('hk-a.nexus.vip')), 'First selected node must use Relay A domain (hk-a.nexus.vip)');
+  assert.ok(adhocLines.some((l) => l.includes('us-c.nexus.vip')), 'Second selected node must use Relay C domain (us-c.nexus.vip)');
+
+  // 4. Create a Custom Multi-Node Subscription Group combining:
+  //    - Relay A's Node-A-1
+  //    - Relay B's Node-B-1
+  //    - Relay C's Node-C-1
+  //    - External Node (extNodeId)
+  //    - Inline Custom URI (trojan://)
+  //    with strict ipLimit: 2 and deviceLimit: 2
+  const createGroupRes = await req('/SecPath16Chars99/api/subcenter/groups', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'VIP客户王总·港日美三线自由组合',
+      groupName: 'VIP专线组',
+      selectedItems: [...createdInboundIds, extNodeId],
+      customUris: ['trojan://TrojanSecretPass99@sg-custom.nexus.vip:443?sni=sg-custom.nexus.vip#SG-Custom-Trojan'],
+      ipLimit: 2,
+      deviceLimit: 2,
+      accessWindowHours: 24,
+      syncNodeLimits: true,
+      totalGB: 200,
+      notes: '测试跨机自由组合与设备限制'
+    })
+  });
+  assert.equal(createGroupRes.status, 201);
+  const subGroup = createGroupRes.json.subGroup;
+  assert.ok(subGroup.token && subGroup.token.length >= 20, 'Custom Subscription Group must have a 24-char high-entropy token');
+  assert.ok(
+    subGroup.urls.autoUrl.includes('master-sub.nexus.vip'),
+    'Subscription URL itself must use the Master Panel domain (master-sub.nexus.vip)'
+  );
+  assert.equal(subGroup.stats.includedNodesCount, 5, 'Custom Subscription Group must include all 5 cross-machine + external nodes');
+
+  // Verify syncNodeLimits propagated ipLimit=2 and deviceLimit=2 to selected single-user inbounds
+  const inbA1 = store.state.inbounds.find((x) => x.id === createdInboundIds[0]);
+  assert.equal(inbA1.limitIp, 2, 'syncNodeLimits must propagate ipLimit=2 to selected inbound');
+  assert.equal(inbA1.limitDevice, 2, 'syncNodeLimits must propagate deviceLimit=2 to selected inbound');
+
+  // 5. Pull Subscription in Base64, Clash, Sing-box, Surge, and SubVault (/s/:token/auto) formats from Device #1 (IP 1.1.1.1)
+  const pull1 = await req(`/sub/${subGroup.token}?format=raw`, {
+    headers: { 'x-forwarded-for': '198.51.100.11', 'user-agent': 'ClashMetaForAndroid/2.10.1' }
+  });
+  assert.equal(pull1.status, 200);
+  const pull1Lines = pull1.text.trim().split('\n');
+  assert.equal(pull1Lines.length, 5, 'Raw subscription pull must return all 5 combined nodes');
+  assert.ok(pull1Lines.some((l) => l.includes('hk-a.nexus.vip')), 'Node from Relay A uses hk-a.nexus.vip');
+  assert.ok(pull1Lines.some((l) => l.includes('jp-b.nexus.vip')), 'Node from Relay B uses jp-b.nexus.vip');
+  assert.ok(pull1Lines.some((l) => l.includes('us-c.nexus.vip')), 'Node from Relay C uses us-c.nexus.vip');
+  assert.ok(pull1Lines.some((l) => l.includes('203.0.113.88')), 'External SS node is included');
+  assert.ok(pull1Lines.some((l) => l.includes('sg-custom.nexus.vip')), 'Inline custom Trojan node is included');
+
+  // Pull Clash format via SubVault-compatible /s/:token/clash route from Device #2 (IP 198.51.100.12)
+  const pull2 = await req(`/s/${subGroup.token}/clash`, {
+    headers: { 'x-forwarded-for': '198.51.100.12', 'user-agent': 'Shadowrocket/2050' }
+  });
+  assert.equal(pull2.status, 200);
+  assert.ok(pull2.text.includes('proxies:'), 'Clash format must contain proxies section');
+  assert.ok(pull2.text.includes('hk-a.nexus.vip') && pull2.text.includes('jp-b.nexus.vip'), 'Clash format must include Relay A and Relay B domains');
+
+  // Pull Surge format from existing Device #2 (IP 198.51.100.12 -> already bound, must be allowed!)
+  const pullSurge = await req(`/sub/${subGroup.token}?format=surge`, {
+    headers: { 'x-forwarded-for': '198.51.100.12', 'user-agent': 'Shadowrocket/2050' }
+  });
+  assert.equal(pullSurge.status, 200);
+  assert.ok(pullSurge.text.includes('[Proxy]'), 'Surge format must contain [Proxy] section');
+
+  // 6. Test IP & Device Limit Enforcement: 3rd distinct IP/Device (198.51.100.13) must be BLOCKED (403) because ipLimit=2 & deviceLimit=2!
+  const pull3Blocked = await req(`/sub/${subGroup.token}?format=base64`, {
+    headers: { 'x-forwarded-for': '198.51.100.13', 'user-agent': 'v2rayNG/1.8.19' }
+  });
+  assert.equal(pull3Blocked.status, 403, '3rd distinct IP/Device must be blocked when ipLimit=2 / deviceLimit=2');
+  assert.ok((pull3Blocked.json.message || pull3Blocked.json.error || '').includes('超限'), 'Blocked response must explain IP/Device limit exceeded');
+
+  // 7. Clear IP/Device bindings via /api/subcenter/groups/:id/action (clear-access) -> 3rd IP/Device can now pull!
+  const clearRes = await req(`/SecPath16Chars99/api/subcenter/groups/${subGroup.id}/action`, {
+    method: 'POST',
+    body: JSON.stringify({ action: 'clear-access' })
+  });
+  assert.equal(clearRes.status, 200);
+
+  const pull3AfterClear = await req(`/sub/${subGroup.token}?format=base64`, {
+    headers: { 'x-forwarded-for': '198.51.100.13', 'user-agent': 'v2rayNG/1.8.19' }
+  });
+  assert.equal(pull3AfterClear.status, 200, 'After clearing access bindings, new device/IP must be allowed');
+
+  // 8. Test Token Rotation (`rotate-token`): old token must immediately return 404, new token works!
+  const oldToken = subGroup.token;
+  const rotRes = await req(`/SecPath16Chars99/api/subcenter/groups/${subGroup.id}/action`, {
+    method: 'POST',
+    body: JSON.stringify({ action: 'rotate-token' })
+  });
+  assert.equal(rotRes.status, 200);
+  const newToken = rotRes.json.subGroup.token;
+  assert.notEqual(newToken, oldToken);
+
+  const oldTokenPull = await req(`/sub/${oldToken}`);
+  assert.equal(oldTokenPull.status, 404, 'Old rotated token must immediately return 404');
+  const newTokenPull = await req(`/sub/${newToken}`, {
+    headers: { 'x-forwarded-for': '198.51.100.13', 'user-agent': 'v2rayNG/1.8.19' }
+  });
+  assert.equal(newTokenPull.status, 200, 'New rotated token must work immediately');
+
+  // 9. Verify Full Master .zip Backup & Restore preserves all subGroups & externalNodes
+  const { buildMasterBackupZip, extractMasterBackupPayload } = require('../lib/zip');
+  const zipBuf = buildMasterBackupZip(store, singbox, '1.0.7');
+  const extracted = extractMasterBackupPayload(zipBuf);
+  assert.ok(Array.isArray(extracted.stateData.subGroups) && extracted.stateData.subGroups.some((g) => g.id === subGroup.id), 'Master .zip backup must preserve subGroups');
+  assert.ok(Array.isArray(extracted.stateData.externalNodes) && extracted.stateData.externalNodes.some((e) => e.id === extNodeId), 'Master .zip backup must preserve externalNodes');
+
+  // Clean up Test 28 resources
+  await req(`/SecPath16Chars99/api/subcenter/groups/${subGroup.id}`, { method: 'DELETE' });
+  await req(`/SecPath16Chars99/api/subcenter/external-nodes/${extNodeId}`, { method: 'DELETE' });
+  for (const nId of relayNodeIds) {
+    await req(`/SecPath16Chars99/api/cluster/nodes/${nId}`, { method: 'DELETE' });
+  }
+});
