@@ -3490,3 +3490,170 @@ test('28. v1.0.7 Custom Multi-Node Subscription Center (SubVault) E2E: Free Cros
     await req(`/SecPath16Chars99/api/cluster/nodes/${nId}`, { method: 'DELETE' });
   }
 });
+
+test('29. v1.0.8 Huawei Cloud SG 456MB Low-RAM Master Benchmark: Pure Master Mode + 50 Cluster Servers (20 Relays + 25 Exits + 5 Standbys) + 100 Custom Subscription Groups + 500 Subscription Pulls & 500 Agent Heartbeats', async () => {
+  const { handleAgentHeartbeat } = require('../lib/cluster');
+  const { formatSubscription } = require('../lib/subscriptions');
+
+  // 1. Enable Pure Master Low-RAM Mode (`pureMasterMode: true`) via PUT /api/settings
+  const setRes = await req('/SecPath16Chars99/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ pureMasterMode: true })
+  });
+  assert.equal(setRes.status, 200);
+  assert.equal(store.state.settings.pureMasterMode, true, 'pureMasterMode must be enabled');
+
+  const pollRes = await singbox.pollConnectionsAndEnforceLimits();
+  assert.equal(pollRes.pureMasterMode, true, 'pollConnectionsAndEnforceLimits must skip local Clash API polling in pureMasterMode');
+
+  // 2. Provision 50 Cluster Servers (20 Relays + 25 Exits + 5 Standbys), 60 Inbounds, and 100 Custom Subscription Groups
+  const benchNodeIds = [];
+  const benchInboundIds = [];
+  const benchSubGroupIds = [];
+  const benchSubTokens = [];
+
+  store.transact((st) => {
+    for (let i = 1; i <= 50; i += 1) {
+      const role = i <= 20 ? 'relay' : (i <= 45 ? 'exit' : 'standby');
+      const nId = `node_hw50_${i}`;
+      benchNodeIds.push(nId);
+      st.nodes.push({
+        id: nId,
+        name: `HW-SG-Cluster-${role.toUpperCase()}-${i}`,
+        role,
+        isLocal: false,
+        enabled: true,
+        host: `198.19.${Math.floor(i / 250)}.${(i % 250) + 1}`,
+        agentPort: 19090,
+        domain: role === 'relay' ? `hw-r${i}.nexus.vip` : '',
+        token: `ag_hw50_tok_${i}`,
+        status: 'online',
+        lastSeenAt: new Date().toISOString(),
+        exitConfig: (role === 'exit') ? {
+          enabled: true,
+          protocol: 'shadowsocks',
+          port: 28000 + i,
+          method: '2022-blake3-aes-128-gcm',
+          password: Buffer.alloc(16, i).toString('base64'),
+          uot: true
+        } : { enabled: false },
+        metrics: { cpuPct: 1.5, memPct: 14.0, memUsedMB: 22, memTotalMB: 512, sbRunning: true, sbVersion: '1.12.23' },
+        createdAt: new Date().toISOString()
+      });
+
+      if (role === 'relay') {
+        for (let k = 1; k <= 3; k += 1) {
+          const inbId = `in_hw50_${i}_${k}`;
+          benchInboundIds.push(inbId);
+          st.inbounds.push({
+            id: inbId,
+            nodeId: nId,
+            tag: `hw50-in-${i}-${k}`,
+            remark: `HW-Relay${i}-Node${k}`,
+            protocol: k === 1 ? 'vless' : (k === 2 ? 'hysteria2' : 'anytls'),
+            port: 20000 + i * 10 + k,
+            security: k === 1 ? 'reality' : 'tls',
+            tlsDomain: `hw-r${i}.nexus.vip`,
+            reality: k === 1 ? {
+              serverName: 'tesla.com',
+              target: 'www.tesla.com:443',
+              privateKey: 'priv_key_demo',
+              publicKey: 'pub_key_demo',
+              shortIds: ['1a2b3c4d'],
+              fingerprint: 'chrome'
+            } : undefined,
+            password: `StrongPass_HW_${i}_${k}_99`,
+            clients: [
+              {
+                id: `00000000-0000-4000-8000-${String(i * 10 + k).padStart(12, '0')}`,
+                email: `hw_user_${i}_${k}`,
+                password: `StrongPass_HW_${i}_${k}_99`,
+                subId: `sub_hw_${i}_${k}`,
+                enable: true
+              }
+            ],
+            enable: true
+          });
+        }
+      }
+    }
+
+    // Create 100 Custom Subscription Groups (each combining 6 cross-machine nodes across different Relays)
+    for (let u = 1; u <= 100; u += 1) {
+      const sgId = `subgrp_hw_${u}`;
+      const tok = `HWSG_SubToken_User_${String(u).padStart(4, '0')}_Secure24`;
+      benchSubGroupIds.push(sgId);
+      benchSubTokens.push(tok);
+      const picked = [];
+      for (let m = 0; m < 6; m += 1) {
+        picked.push(benchInboundIds[(u + m * 7) % benchInboundIds.length]);
+      }
+      st.subGroups.push({
+        id: sgId,
+        name: `客户套餐_${u}`,
+        groupName: u <= 50 ? '企业VIP组' : '标准专线组',
+        token: tok,
+        enabled: true,
+        selectedItems: picked,
+        customUris: [],
+        ipLimit: 5,
+        deviceLimit: 8,
+        accessWindowHours: 24,
+        syncNodeLimits: false,
+        totalGB: 500,
+        totalBytes: 500 * (1024 ** 3),
+        upOffset: 0,
+        downOffset: 0,
+        expiryTime: Date.now() + 30 * 86400 * 1000,
+        accessKeys: [],
+        pullCount: 0,
+        blockedCount: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+    }
+  });
+
+  // 3. Benchmark 500 Agent Heartbeats across 50 Cluster Servers (10 rounds * 50 servers)
+  const memBeforeMB = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
+  const hbStart = Date.now();
+  for (let round = 0; round < 10; round += 1) {
+    for (let i = 0; i < 50; i += 1) {
+      const nId = benchNodeIds[i];
+      const node = store.state.nodes.find((n) => n.id === nId);
+      const res = handleAgentHeartbeat(store, nId, node.token, {
+        configHash: node.configHash || '',
+        metrics: { cpuPct: 2.0, memPct: 15.0, memUsedMB: 24, memTotalMB: 512, sbRunning: true, sbVersion: '1.12.23' },
+        inboundDeltas: { [`hw50-in-${i + 1}-1`]: { up: 32768, down: 262144 } }
+      });
+      assert.equal(res.ok, true);
+    }
+  }
+  const hbElapsedMs = Date.now() - hbStart;
+  assert.ok(hbElapsedMs < 800, `500 Agent heartbeats across 50 servers must complete in < 800ms with memoized config cache (took ${hbElapsedMs}ms)`);
+
+  // 4. Benchmark 500 Subscription Pulls across 100 Users (Base64 + Clash + Sing-box + Surge)
+  const subStart = Date.now();
+  const formats = ['base64', 'clash', 'singbox', 'surge'];
+  for (let pull = 0; pull < 500; pull += 1) {
+    const tok = benchSubTokens[pull % benchSubTokens.length];
+    const fmt = formats[pull % formats.length];
+    const out = formatSubscription(store.state, tok, fmt, 'master.hwsg.vip:15975');
+    assert.ok(out && out.body.length > 50, `Subscription pull #${pull} (${fmt}) must return valid profile`);
+  }
+  const subElapsedMs = Date.now() - subStart;
+  const memAfterMB = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
+  assert.ok(subElapsedMs < 500, `500 multi-format subscription pulls across 100 custom user groups must complete in < 500ms (took ${subElapsedMs}ms)`);
+  assert.ok(memAfterMB - memBeforeMB < 25, `Heap memory growth after 500 heartbeats + 500 subscription pulls must stay < 25MB (delta: ${memAfterMB - memBeforeMB}MB)`);
+
+  // Clean up Test 29 benchmark data
+  store.transact((st) => {
+    st.settings.pureMasterMode = false;
+    const nSet = new Set(benchNodeIds);
+    const iSet = new Set(benchInboundIds);
+    const gSet = new Set(benchSubGroupIds);
+    st.nodes = st.nodes.filter((n) => !nSet.has(n.id));
+    st.inbounds = st.inbounds.filter((i) => !iSet.has(i.id));
+    st.subGroups = st.subGroups.filter((g) => !gSet.has(g.id));
+  });
+});

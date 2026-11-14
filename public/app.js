@@ -490,7 +490,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.7 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.8 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -558,7 +558,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.7</span>
+          <span class="tag">NexusGate Plus v1.0.8</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -2580,6 +2580,11 @@ function renderSettings() {
           <label class="wide" style="flex-direction:row;align-items:center;gap:8px">
             <input type="checkbox" name="strictBasePath" style="width:16px;min-height:16px" ${s.strictBasePath !== false ? 'checked' : ''}>
             <span><b>禁止单 IP+端口直接访问面板</b>（默认开启：访问无安全路径的 <code>IP:端口/</code> 直接返回 404，必须通过 <code>IP/域名:端口/安全路径/</code> 访问）</span>
+          </label>
+
+          <label class="wide" style="flex-direction:row;align-items:center;gap:8px;padding:10px 12px;border-radius:9px;background:var(--success-soft);border:1px solid color-mix(in srgb,var(--success) 30%,var(--line))">
+            <input type="checkbox" name="pureMasterMode" style="width:16px;min-height:16px" ${s.pureMasterMode ? 'checked' : ''}>
+            <span><b style="color:var(--success)">🍃 开启「纯主控超低内存模式 (Pure Master Low-RAM Mode)」</b>（适合 512MB 小内存 VPS 或与探针/Flux/Caddy 共存：主控本机仅运行管理面板与组合订阅中心，不启动本机 Sing-box 转发进程，常驻内存仅 ~18MB，可轻松统管 50+ 台设备与几百用户订阅）</span>
           </label>
 
           <label>
@@ -6023,6 +6028,7 @@ document.addEventListener('submit', async (e) => {
       const payload = {
         ...data,
         strictBasePath: form.querySelector('[name="strictBasePath"]')?.checked || false,
+        pureMasterMode: form.querySelector('[name="pureMasterMode"]')?.checked || false,
         masterAutoTakeover: takeoverSel !== 'manual',
         masterAutoTakeoverMinutes: takeoverSel !== 'manual' ? Number(takeoverSel || 3) : Number(state.settings?.masterAutoTakeoverMinutes || 3)
       };

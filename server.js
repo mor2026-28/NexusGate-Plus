@@ -81,7 +81,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.7';
+const VERSION = '1.0.8';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -1417,7 +1417,7 @@ function autoApplyIfEnabled(portsToOpen = []) {
     }
     if (store.state.settings.autoApplyConfig !== false) {
       try {
-        if (fs.existsSync(singbox.getBinPath())) {
+        if (!store.state.settings.pureMasterMode && fs.existsSync(singbox.getBinPath())) {
           if (hadConfigChange || singbox.getStatus().state !== 'running') {
             singbox.restart();
           }
@@ -3207,6 +3207,7 @@ async function handleRequest(req, res) {
         if (body.singboxBin !== undefined) s.singboxBin = String(body.singboxBin).trim();
         if (body.singboxLogLevel !== undefined) s.singboxLogLevel = String(body.singboxLogLevel).trim();
         if (body.autoApplyConfig !== undefined) s.autoApplyConfig = Boolean(body.autoApplyConfig);
+        if (body.pureMasterMode !== undefined) s.pureMasterMode = Boolean(body.pureMasterMode);
         if (body.cfApiToken !== undefined) s.cfApiToken = String(body.cfApiToken).trim();
         if (body.cfDefaultZoneId !== undefined) s.cfDefaultZoneId = String(body.cfDefaultZoneId).trim();
         if (body.autoFailover !== undefined) s.autoFailover = Boolean(body.autoFailover);
