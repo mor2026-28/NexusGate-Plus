@@ -1,5 +1,6 @@
 'use strict';
 
+const net = require('node:net');
 const http = require('node:http');
 const https = require('node:https');
 const fs = require('node:fs');

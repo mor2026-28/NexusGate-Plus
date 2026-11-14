@@ -3703,25 +3703,21 @@ test('30. Final Acceptance E2E: Huawei Cloud SG 3-Panel Coexistence (tz:8080 + f
   // 4. Verify Dual-Protocol HTTP + HTTPS Multiplexing on the SAME port (so both direct https://ip:port/basePath/ and Caddy http://127.0.0.1:port work simultaneously!)
   const { issueSelfSignedCert } = require('../lib/system');
   const tlsCert = issueSelfSignedCert({ domain: 'cs.vponlive.com', ip: '127.0.0.1', baseDir: path.join(tmpDir, 'dual-tls-certs') });
-  const dualNetServer = (() => {
-    const cert = fs.readFileSync(tlsCert.certPath);
-    const key = fs.readFileSync(tlsCert.keyPath);
-    const httpsSrv = https.createServer({ cert, key }, handleRequest);
-    const httpSrv = http.createServer(handleRequest);
-    const net = require('node:net');
-    return net.createServer((socket) => {
-      socket.once('data', (chunk) => {
-        socket.pause();
-        const target = (chunk && chunk[0] === 0x16) ? httpsSrv : httpSrv;
-        socket.unshift(chunk);
-        target.emit('connection', socket);
-        process.nextTick(() => socket.resume());
-      });
-      socket.on('error', () => {});
+  const prevPort = store.state.settings.webPort;
+  const prevCert = store.state.settings.webCertFile;
+  const prevKey = store.state.settings.webKeyFile;
+  store.state.settings.webPort = 0;
+  store.state.settings.webCertFile = tlsCert.certPath;
+  store.state.settings.webKeyFile = tlsCert.keyPath;
+  const { startPanelServer } = require('../server');
+  let startedProto = '';
+  const dualNetServer = await new Promise((resolve) => {
+    startPanelServer((srvInst, proto) => {
+      startedProto = proto;
+      resolve(srvInst);
     });
-  })();
-
-  await new Promise((resolve) => dualNetServer.listen(0, '127.0.0.1', resolve));
+  });
+  assert.equal(startedProto, 'https', 'startPanelServer must start in https mode without throwing ReferenceError');
   const dualPort = dualNetServer.address().port;
 
   try {
@@ -3747,6 +3743,9 @@ test('30. Final Acceptance E2E: Huawei Cloud SG 3-Panel Coexistence (tz:8080 + f
     assert.equal(httpsHealth.status, 200);
     assert.equal(httpsHealth.body.status, 'ok');
   } finally {
+    store.state.settings.webPort = prevPort;
+    store.state.settings.webCertFile = prevCert;
+    store.state.settings.webKeyFile = prevKey;
     await new Promise((resolve) => dualNetServer.close(resolve));
   }
 
