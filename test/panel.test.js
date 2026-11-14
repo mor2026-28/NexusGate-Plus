@@ -3765,4 +3765,22 @@ test('30. Final Acceptance E2E: Huawei Cloud SG 3-Panel Coexistence (tz:8080 + f
   const localSbCfg = singbox.writeConfig().config;
   const localPorts = (localSbCfg.inbounds || []).map((i) => i.listen_port);
   assert.ok(!localPorts.includes(8080), 'Local Master sing-box config must never bind remote Relay port 8080');
+
+  // 6. Verify Probe domain (tz01.vponlive.com) isolation & --set-domain switch to zz.vponlive.com
+  const { getOtherPanelDomains } = require('../lib/system');
+  const otherDoms = getOtherPanelDomains(mockCaddy);
+  assert.ok(otherDoms.has('tz01.vponlive.com'), 'getOtherPanelDomains must detect probe domain tz01.vponlive.com from Caddyfile');
+  assert.ok(otherDoms.has('zf.vponlive.com'), 'getOtherPanelDomains must detect flux domain zf.vponlive.com from Caddyfile');
+  assert.ok(!otherDoms.has('cs.vponlive.com'), 'getOtherPanelDomains must NOT flag NexusGate-Plus own Caddy block');
+
+  // Switch domain to zz.vponlive.com via PUT /api/settings and verify local node & subscription URLs use zz.vponlive.com
+  const setDomRes = await req('/SecPath16Chars99/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ webDomain: 'zz.vponlive.com' })
+  });
+  assert.equal(setDomRes.status, 200);
+  assert.equal(store.state.settings.webDomain, 'zz.vponlive.com');
+  const localMasterNode = store.state.nodes.find((n) => n.isLocal);
+  assert.equal(localMasterNode.domain, 'zz.vponlive.com', 'Local Master node domain must sync to zz.vponlive.com');
 });
+

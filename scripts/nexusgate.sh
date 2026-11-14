@@ -227,26 +227,58 @@ ssl_cert_menu() {
       1)
         ensure_acme
         local domain="" email="" port80=""
-        read -r -p "请输入已解析到本机的域名: " domain </dev/tty
-        domain="$(echo "$domain" | tr -d '\r\n ')"
+        read -r -p "请输入已解析到本机的专属域名 (如 zz.vponlive.com): " domain </dev/tty
+        domain="$(echo "$domain" | tr -d '\r\n ' | sed -E 's#^https?://##; s#/.*$##')"
         [[ -n "$domain" ]] || die "域名不能为空"
         read -r -p "请输入通知邮箱 (可留空): " email </dev/tty || true
         read -r -p "HTTP 验证监听端口 [默认 80]: " port80 </dev/tty || true
         port80="${port80:-80}"
         [[ -n "$email" ]] && ~/.acme.sh/acme.sh --register-account -m "$email" >/dev/null 2>&1 || true
+
+        # 自动清理因之前 80 端口冲突残留的空 _ecc 目录，防止 cat *.key No such file or directory
+        if [[ ! -s "/root/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
+          rm -rf "/root/.acme.sh/${domain}_ecc"
+        fi
+        if [[ ! -s "/root/.acme.sh/${domain}/${domain}.key" ]]; then
+          rm -rf "/root/.acme.sh/${domain}"
+        fi
+
         mkdir -p "/root/cert/${domain}" "/etc/nexusgate/certs/${domain}"
+        local caddy_was_active=0
+        if [[ "$port80" == "80" ]] && systemctl is-active --quiet caddy 2>/dev/null; then
+          info "检测到本机 Caddy (探针/Flux反代) 正在占用 80 端口，正在临时暂停 Caddy 3 秒以完成证书验证..."
+          systemctl stop caddy 2>/dev/null || true
+          caddy_was_active=1
+        fi
+
         ~/.acme.sh/acme.sh --issue -d "$domain" --standalone --httpport "$port80" --force || true
         ~/.acme.sh/acme.sh --installcert -d "$domain" \
           --key-file "/root/cert/${domain}/privkey.pem" \
-          --fullchain-file "/root/cert/${domain}/fullchain.pem"
-        cp -f "/root/cert/${domain}/fullchain.pem" "/etc/nexusgate/certs/${domain}/fullchain.pem"
-        cp -f "/root/cert/${domain}/privkey.pem" "/etc/nexusgate/certs/${domain}/privkey.pem"
+          --fullchain-file "/root/cert/${domain}/fullchain.pem" || true
+
+        if [[ "$caddy_was_active" -eq 1 ]]; then
+          systemctl start caddy 2>/dev/null || true
+          info "已恢复启动本机 Caddy 服务！"
+        fi
+
         systemctl stop nexusgate.service 2>/dev/null || true
         rm -rf /etc/nexusgate/certs/www.bing.com /root/cert/www.bing.com 2>/dev/null || true
-        NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-cert "/root/cert/${domain}/fullchain.pem" "/root/cert/${domain}/privkey.pem" "$domain"
+        if [[ -s "/root/cert/${domain}/fullchain.pem" && -s "/root/cert/${domain}/privkey.pem" ]]; then
+          cp -f "/root/cert/${domain}/fullchain.pem" "/etc/nexusgate/certs/${domain}/fullchain.pem"
+          cp -f "/root/cert/${domain}/privkey.pem" "/etc/nexusgate/certs/${domain}/privkey.pem"
+          NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-domain "$domain"
+          NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-cert "/root/cert/${domain}/fullchain.pem" "/root/cert/${domain}/privkey.pem" "$domain"
+          ok "域名 ${domain} Let's Encrypt 证书申请成功，已设为面板访问与订阅中心专属域名（已彻底解绑探针域名）！"
+        else
+          warn "Let's Encrypt 80 端口验证未返回证书，正在为您自动生成 ${domain} 专属 10 年 SSL 证书并切换面板与订阅域名..."
+          local pub_ip=""
+          pub_ip="$(curl -fsSL4 --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+          NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --issue-selfsigned "$domain" "$pub_ip" --force
+          NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-domain "$domain"
+          ok "已将面板与订阅域名切换为 ${domain}！"
+        fi
         systemctl start nexusgate.service 2>/dev/null || true
         systemctl restart nexusgate-singbox.service 2>/dev/null || true
-        ok "域名 ${domain} 证书申请成功，已同时设为面板 HTTPS 与全部 TLS 节点默认证书！"
         show_info
         ;;
       2)
@@ -256,10 +288,16 @@ ssl_cert_menu() {
         read -r -p "请输入本机公网 IPv4 [默认 ${pub_ip}]: " input_ip </dev/tty || true
         pub_ip="${input_ip:-$pub_ip}"
         mkdir -p "/root/cert/ip" "/etc/nexusgate/certs/${pub_ip}"
-        ~/.acme.sh/acme.sh --issue -d "$pub_ip" --standalone --server letsencrypt --certificate-profile shortlived --days 6 --httpport 80 --force
+        local caddy_was_active=0
+        if systemctl is-active --quiet caddy 2>/dev/null; then
+          systemctl stop caddy 2>/dev/null || true
+          caddy_was_active=1
+        fi
+        ~/.acme.sh/acme.sh --issue -d "$pub_ip" --standalone --server letsencrypt --certificate-profile shortlived --days 6 --httpport 80 --force || true
         ~/.acme.sh/acme.sh --installcert -d "$pub_ip" \
           --key-file "/root/cert/ip/privkey.pem" \
           --fullchain-file "/root/cert/ip/fullchain.pem" || true
+        [[ "$caddy_was_active" -eq 1 ]] && systemctl start caddy 2>/dev/null || true
         systemctl stop nexusgate.service 2>/dev/null || true
         NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --set-cert "/root/cert/ip/fullchain.pem" "/root/cert/ip/privkey.pem" "$pub_ip"
         systemctl start nexusgate.service 2>/dev/null || true
@@ -551,14 +589,21 @@ migrate_3xui() {
 
 update_panel() {
   need_root
-  info "正在从 GitHub (${REPO}@${BRANCH}) 更新 NexusGate 面板与脚本..."
   local tmp
   tmp="$(mktemp -d /tmp/ng-update.XXXXXX)"
-  curl -fL --retry 3 "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" -o "$tmp/src.tar.gz"
+  local latest_zip=""
+  latest_zip="$(ls -1t /root/NexusGate-Plus*.zip 2>/dev/null | head -n 1 || true)"
   systemctl stop nexusgate.service nexusgate-singbox.service 2>/dev/null || true
   pkill -9 -f "sing-box run" 2>/dev/null || true
   mkdir -p "$INSTALL_DIR"
-  tar -xzf "$tmp/src.tar.gz" -C "$INSTALL_DIR" --strip-components=1
+  if [[ -n "$latest_zip" && -f "$latest_zip" ]] && command -v unzip >/dev/null 2>&1; then
+    info "检测到 /root 下存在本地更新包 (${latest_zip})，正在直接解压更新..."
+    unzip -oq "$latest_zip" -d "$INSTALL_DIR"
+  else
+    info "正在从 GitHub (${REPO}@${BRANCH}) 更新 NexusGate 面板与脚本..."
+    curl -fL --retry 3 "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" -o "$tmp/src.tar.gz"
+    tar -xzf "$tmp/src.tar.gz" -C "$INSTALL_DIR" --strip-components=1
+  fi
   install -m 0644 "$INSTALL_DIR/systemd/nexusgate.service" /etc/systemd/system/nexusgate.service
   install -m 0644 "$INSTALL_DIR/systemd/nexusgate-singbox.service" /etc/systemd/system/nexusgate-singbox.service
   install -m 0755 "$INSTALL_DIR/nexusgate.sh" /usr/local/bin/nexusgate
@@ -586,7 +631,7 @@ EOF
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate Plus 面板与管理脚本已更新至 v1.0.8，所有节点与 Sing-box 内核已重新加载生效！"
+  ok "NexusGate Plus 面板与管理脚本已更新至 v1.0.9，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
   if [[ -r /dev/tty ]]; then
     pause_return
@@ -686,7 +731,7 @@ uninstall_panel() {
 show_menu() {
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
-  ${cyan}║${plain}     ${green}         NexusGate Plus · 枢门集群 面板管理脚本 (v1.0.8)         ${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${green}         NexusGate Plus · 枢门集群 面板管理脚本 (v1.0.9)         ${plain}      ${cyan}║${plain}
   ${cyan}║${plain}     ${yellow}全协议节点编排 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}          ${cyan}║${plain}
   ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
   ${green}0.${plain} 退出脚本

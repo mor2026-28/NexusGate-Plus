@@ -41,6 +41,7 @@ const {
   applyKernelAcceleration,
   cleanupSystemLogsAndMemory,
   inspectCertificate,
+  getOtherPanelDomains,
   discoverSystemCertificates,
   issueSelfSignedCert,
   saveCustomCert,
@@ -81,7 +82,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.8';
+const VERSION = '1.0.9';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -135,8 +136,11 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
   if (applyToPanel) {
     st.settings.webCertFile = cert.certPath;
     st.settings.webKeyFile = cert.keyPath;
-    if (isRealAcme && cert.domain && cert.domain !== 'www.apple.com') {
+    if (cert.domain && cert.domain !== 'www.apple.com' && (isRealAcme || forceAllTlsNodes)) {
       st.settings.webDomain = cert.domain;
+      for (const n of st.nodes || []) {
+        if (n.isLocal) n.domain = cert.domain;
+      }
     } else if (!isRealAcme && !st.settings.webDomain) {
       st.settings.webDomain = '';
     }
@@ -191,9 +195,33 @@ function syncDiscoveredCerts(force = false) {
   const deletedDomains = new Set(store.state.settings.deletedCertDomains || []);
   const deletedPaths = new Set(store.state.settings.deletedCertPaths || []);
 
+  const otherDomains = getOtherPanelDomains();
+  const isProbeOrOtherDomain = (dom) => {
+    const d = String(dom || '').trim().toLowerCase();
+    if (!d) return false;
+    return otherDomains.has(d) || /^tz\d*\./i.test(d);
+  };
+
+  // Self-heal if webDomain or localNode.domain was accidentally set to a Probe/Flux domain (e.g. tz01.vponlive.com)
+  if (isProbeOrOtherDomain(store.state.settings.webDomain)) {
+    store.state.settings.webDomain = '';
+    changed = true;
+  }
+  if (isProbeOrOtherDomain(store.state.settings.defaultTlsDomain)) {
+    store.state.settings.defaultTlsDomain = store.state.settings.webDomain || 'www.apple.com';
+    changed = true;
+  }
+  for (const n of store.state.nodes || []) {
+    if (n.isLocal && isProbeOrOtherDomain(n.domain)) {
+      n.domain = store.state.settings.webDomain || '';
+      changed = true;
+    }
+  }
+
   const beforeLen = store.state.certificates.length;
   store.state.certificates = (store.state.certificates || []).filter((c) => {
     if (c.domain === 'www.bing.com') return false;
+    if (isProbeOrOtherDomain(c.domain)) return false;
     if (deletedDomains.has(c.domain) || deletedPaths.has(c.certPath)) return false;
     if (c.certPath && !c.certPem && !fs.existsSync(c.certPath)) return false;
     return true;
@@ -884,6 +912,24 @@ function handleCliCommand(args) {
       st.settings.webPort = port;
     });
     console.log(`面板端口已更改为: ${port}`);
+    return;
+  }
+  if (cmd === '--set-domain') {
+    const dom = String(args[1] || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+    store.transact((st) => {
+      const oldDom = st.settings.webDomain || '';
+      if (oldDom && oldDom !== dom) {
+        if (!Array.isArray(st.settings.deletedCertDomains)) st.settings.deletedCertDomains = [];
+        if (!st.settings.deletedCertDomains.includes(oldDom)) st.settings.deletedCertDomains.push(oldDom);
+      }
+      st.settings.webDomain = dom;
+      if (dom) st.settings.defaultTlsDomain = dom;
+      for (const n of st.nodes || []) {
+        if (n.isLocal) n.domain = dom;
+      }
+    });
+    singbox.writeConfig();
+    console.log(dom ? `面板与订阅专属域名已更新为: ${dom}` : '已清空面板绑定域名');
     return;
   }
   if (cmd === '--set-path') {
@@ -3183,7 +3229,16 @@ async function handleRequest(req, res) {
         if (body.strictBasePath !== undefined) {
           s.strictBasePath = Boolean(body.strictBasePath);
         }
-        if (body.webDomain !== undefined) s.webDomain = String(body.webDomain).trim();
+        if (body.webDomain !== undefined) {
+          const nextDom = String(body.webDomain).trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+          s.webDomain = nextDom;
+          if (nextDom && (!s.defaultTlsDomain || s.defaultTlsDomain === 'www.apple.com' || /^tz\d*\./i.test(s.defaultTlsDomain))) {
+            s.defaultTlsDomain = nextDom;
+          }
+          for (const n of st.nodes || []) {
+            if (n.isLocal) n.domain = nextDom;
+          }
+        }
         if (body.publicIPv4 !== undefined) s.publicIPv4 = String(body.publicIPv4).trim();
         if (body.publicIPv6 !== undefined) s.publicIPv6 = String(body.publicIPv6).trim();
         if (body.trafficResetDay !== undefined) {
