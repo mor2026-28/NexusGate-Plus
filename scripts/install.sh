@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+trap 'stty sane 2>/dev/null || true' EXIT INT TERM
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
@@ -74,10 +75,20 @@ gen_random_str() {
 }
 
 gen_random_port() {
-  if command -v node >/dev/null 2>&1; then
-    node -e 'process.stdout.write(String(require("crypto").randomInt(15000, 60001)))' 2>/dev/null && return 0
-  fi
-  shuf -i 15000-60000 -n 1 2>/dev/null || echo $(( (RANDOM % 45000) + 15000 ))
+  local p=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if command -v node >/dev/null 2>&1; then
+      p="$(node -e 'process.stdout.write(String(require("crypto").randomInt(15000, 60001)))' 2>/dev/null || true)"
+    fi
+    [[ -z "$p" ]] && p="$(shuf -i 15000-60000 -n 1 2>/dev/null || echo $(( (RANDOM % 45000) + 15000 )))"
+    if [[ "$p" != "8080" && "$p" != "6366" && "$p" != "19090" && "$p" != "10085" && "$p" != "10086" ]]; then
+      if ! ss -tuln 2>/dev/null | grep -qE ":${p}[[:space:]]"; then
+        printf "%s" "$p"
+        return 0
+      fi
+    fi
+  done
+  printf "%s" "${p:-25880}"
 }
 
 detect_arch() {
@@ -343,7 +354,7 @@ EOF
     systemctl restart nexusgate-singbox.service || true
   else
     pkill -f "node.*$INSTALL_DIR/server.js" 2>/dev/null || true
-    nohup env NG_DATA_FILE="${DATA_DIR}/nexusgate.json" MALLOC_ARENA_MAX=2 node --expose-gc --max-semi-space-size=8 --max-old-space-size=256 "$INSTALL_DIR/server.js" >/var/log/nexusgate.log 2>&1 &
+    nohup env NG_DATA_FILE="${DATA_DIR}/nexusgate.json" MALLOC_ARENA_MAX=2 node --expose-gc --max-semi-space-size=8 --max-old-space-size=96 "$INSTALL_DIR/server.js" >/var/log/nexusgate.log 2>&1 &
   fi
 
   echo ""

@@ -952,9 +952,10 @@ function handleCliCommand(args) {
     return;
   }
   if (cmd === '--open-firewall') {
+    const servedLocalIds = new Set(['node_local', ...(store.state.nodes || []).filter((n) => n.isLocal).map((n) => n.id)]);
     const ports = [
       store.state.settings.webPort,
-      ...(store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port)
+      ...(store.state.inbounds || []).filter((i) => i.enable !== false && servedLocalIds.has(i.nodeId || 'node_local')).map((i) => i.port)
     ];
     const res = openFirewallPorts(ports);
     console.log(`已自动放行端口: ${res.openedPorts.join(', ')}`);
@@ -3207,7 +3208,15 @@ async function handleRequest(req, res) {
         if (body.singboxBin !== undefined) s.singboxBin = String(body.singboxBin).trim();
         if (body.singboxLogLevel !== undefined) s.singboxLogLevel = String(body.singboxLogLevel).trim();
         if (body.autoApplyConfig !== undefined) s.autoApplyConfig = Boolean(body.autoApplyConfig);
-        if (body.pureMasterMode !== undefined) s.pureMasterMode = Boolean(body.pureMasterMode);
+        if (body.pureMasterMode !== undefined) {
+          const nextPure = Boolean(body.pureMasterMode);
+          if (nextPure && !s.pureMasterMode && !process.env.NG_TEST_MODE) {
+            setImmediate(() => { try { singbox.stop(); } catch { /* ignore */ } });
+          } else if (!nextPure && s.pureMasterMode && !process.env.NG_TEST_MODE) {
+            setImmediate(() => { try { if (fs.existsSync(singbox.getBinPath())) singbox.restart(); } catch { /* ignore */ } });
+          }
+          s.pureMasterMode = nextPure;
+        }
         if (body.cfApiToken !== undefined) s.cfApiToken = String(body.cfApiToken).trim();
         if (body.cfDefaultZoneId !== undefined) s.cfDefaultZoneId = String(body.cfDefaultZoneId).trim();
         if (body.autoFailover !== undefined) s.autoFailover = Boolean(body.autoFailover);
@@ -3755,7 +3764,27 @@ function createPanelServer() {
     try {
       const cert = fs.readFileSync(s.webCertFile);
       const key = fs.readFileSync(s.webKeyFile);
-      return { server: https.createServer({ cert, key }, handleRequest), proto: 'https' };
+      const httpsServer = https.createServer({ cert, key }, handleRequest);
+      const httpServer = http.createServer(handleRequest);
+      const netServer = net.createServer((socket) => {
+        socket.once('data', (chunk) => {
+          socket.pause();
+          const target = (chunk && chunk[0] === 0x16) ? httpsServer : httpServer;
+          socket.unshift(chunk);
+          target.emit('connection', socket);
+          process.nextTick(() => socket.resume());
+        });
+        socket.on('error', () => {});
+      });
+      netServer.closeIdleConnections = () => {
+        try { httpsServer.closeIdleConnections?.(); } catch { /* ignore */ }
+        try { httpServer.closeIdleConnections?.(); } catch { /* ignore */ }
+      };
+      netServer.closeAllConnections = () => {
+        try { httpsServer.closeAllConnections?.(); } catch { /* ignore */ }
+        try { httpServer.closeAllConnections?.(); } catch { /* ignore */ }
+      };
+      return { server: netServer, proto: 'https' };
     } catch (err) {
       console.error('加载面板 SSL 证书失败，回退至 HTTP 模式:', err.message);
     }

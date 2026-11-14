@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+trap 'stty sane 2>/dev/null || true' EXIT INT TERM
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
@@ -593,6 +594,78 @@ EOF
   fi
 }
 
+
+configure_caddy_domain() {
+  need_root
+  local caddy_file="${NG_CADDY_FILE:-/etc/caddy/Caddyfile}"
+  local cur_info panel_port base_path cur_domain
+  cur_info="$(NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --show-info-json 2>/dev/null || echo "{}")"
+  panel_port="$(echo "$cur_info" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.port||"2053"))' 2>/dev/null || echo "2053")"
+  base_path="$(echo "$cur_info" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.basePath||"/"))' 2>/dev/null || echo "/")"
+  cur_domain="$(echo "$cur_info" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d.domain||""))' 2>/dev/null || echo "")"
+
+  echo -e "${cyan}──────────────── Caddy HTTPS 域名反代配置 (与探针 tz / Flux fl 零冲突共存) ────────────────${plain}"
+  echo -e " 当前面板端口 : ${yellow}${panel_port}${plain} (安全路径: ${yellow}${base_path}${plain})"
+  echo -e " 当前绑定域名 : ${green}${cur_domain:-未绑定}${plain}"
+  local domain="${1:-}"
+  if [[ -z "$domain" ]]; then
+    read -r -p "请输入要绑定的域名 (输入 clear 解绑 Caddy 反代，直接回车取消): " domain </dev/tty || true
+  fi
+  domain="$(echo "$domain" | tr -d '[:space:]' | sed -E 's#^https?://##; s#/.*$##')"
+  [[ -n "$domain" ]] || { warn "域名为空，已取消操作"; return 0; }
+
+  if [[ "$domain" == "clear" ]]; then
+    if [[ -f "$caddy_file" ]]; then
+      sed -i '/# BEGIN NEXUSGATE-PLUS/,/# END NEXUSGATE-PLUS/d' "$caddy_file"
+      systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+    fi
+    ok "已移除 NexusGate Plus 的 Caddy 独立反代块（探针 tz 与 Nexus-Flux fl 配置完好无损）"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$caddy_file")"
+  touch "$caddy_file"
+  local other_blocks
+  other_blocks="$(sed '/# BEGIN NEXUSGATE-PLUS/,/# END NEXUSGATE-PLUS/d' "$caddy_file")"
+  if echo "$other_blocks" | grep -Fq "$domain"; then
+    warn "检测到域名 ${domain} 已被本机其他面板 (如探针 tz 或 Nexus-Flux fl) 占用，请使用不同的二级域名！"
+    return 1
+  fi
+
+  sed -i '/# BEGIN NEXUSGATE-PLUS/,/# END NEXUSGATE-PLUS/d' "$caddy_file"
+  cat >> "$caddy_file" <<EOF_CADDY
+
+# BEGIN NEXUSGATE-PLUS
+${domain} {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:${panel_port}
+}
+# END NEXUSGATE-PLUS
+EOF_CADDY
+
+  NG_DATA_FILE="$DATA_FILE" node -e '
+    const fs = require("fs");
+    const p = process.env.NG_DATA_FILE;
+    if (fs.existsSync(p)) {
+      const d = JSON.parse(fs.readFileSync(p, "utf8"));
+      d.settings = d.settings || {};
+      d.settings.webDomain = process.argv[1];
+      if (!d.settings.defaultTlsDomain || d.settings.defaultTlsDomain === "www.apple.com") {
+        d.settings.defaultTlsDomain = process.argv[1];
+      }
+      d.panel = { port: Number(d.settings.webPort || 2053), basePath: String(d.settings.webBasePath || "/"), domain: process.argv[1] };
+      fs.writeFileSync(p, JSON.stringify(d));
+    }
+  ' "$domain" 2>/dev/null || true
+
+  if command -v caddy >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    systemctl enable caddy >/dev/null 2>&1 || true
+    systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+  fi
+  ok "已配置 Caddy 独立块反代 (# BEGIN NEXUSGATE-PLUS)：https://${domain}${base_path}"
+  ok "同时保留原端口直连访问：https://${domain}:${panel_port}${base_path}"
+}
+
 uninstall_panel() {
   need_root
   read -r -p "确定要卸载 NexusGate 面板吗？[y/N]: " confirm </dev/tty
@@ -601,13 +674,16 @@ uninstall_panel() {
   systemctl disable nexusgate.service nexusgate-singbox.service 2>/dev/null || true
   rm -f /etc/systemd/system/nexusgate.service /etc/systemd/system/nexusgate-singbox.service
   systemctl daemon-reload 2>/dev/null || true
+  if [[ -f /etc/caddy/Caddyfile ]]; then
+    sed -i '/# BEGIN NEXUSGATE-PLUS/,/# END NEXUSGATE-PLUS/d' /etc/caddy/Caddyfile
+    systemctl reload caddy 2>/dev/null || true
+  fi
   rm -rf "$INSTALL_DIR" /usr/local/bin/nexusgate /usr/local/bin/ng
   ok "NexusGate 面板已卸载（数据备份保留在 /var/lib/nexusgate）"
   exit 0
 }
 
 show_menu() {
-  clear 2>/dev/null || true
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
   ${cyan}║${plain}     ${green}         NexusGate Plus · 枢门集群 面板管理脚本 (v1.0.8)         ${plain}      ${cyan}║${plain}
@@ -646,6 +722,7 @@ show_menu() {
   ${green}24.${plain} Speedtest 测速工具
   ${green}25.${plain} 一键备份迁移 (导入 x-ui.db / 通用备份包恢复全部节点与证书)
   ${green}26.${plain} 一键清理系统日志与释放内存
+  ${green}27.${plain} 配置 Caddy HTTPS 域名反代 (与探针 tz / Flux fl 共享 443 零冲突)
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   面板状态: $(panel_status_text)
   开机启动: $(autostart_status_text)
@@ -653,7 +730,7 @@ show_menu() {
   网络加速: $(bbr_status_text)
 "
   local choice=""
-  read -r -p "请输入选项 [0-26]: " choice </dev/tty || exit 0
+  read -r -p "请输入选项 [0-27]: " choice </dev/tty || exit 0
   case "$choice" in
     0) exit 0 ;;
     1) bash "$INSTALL_DIR/install.sh" ;;
@@ -682,7 +759,8 @@ show_menu() {
     24) run_speedtest ; pause_return ;;
     25) migrate_3xui ; pause_return ;;
     26) cleanup_memory_and_logs ; pause_return ;;
-    *) warn "请输入有效数字 [0-26]" ; sleep 1 ;;
+    27) configure_caddy_domain ; pause_return ;;
+    *) warn "请输入有效数字 [0-27]" ; sleep 1 ;;
   esac
 }
 
@@ -711,6 +789,7 @@ if [[ $# -gt 0 ]]; then
     log|logs) journalctl -u nexusgate.service -u nexusgate-singbox.service -n 100 --no-pager ;;
     bbr) bbr_menu ;;
     cert|ssl) ssl_cert_menu ;;
+    domain|caddy) configure_caddy_domain "${2:-}" ;;
     firewall|fw) NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall ;;
     migrate) migrate_3xui ;;
     update) update_panel ;;

@@ -3657,3 +3657,112 @@ test('29. v1.0.8 Huawei Cloud SG 456MB Low-RAM Master Benchmark: Pure Master Mod
     st.subGroups = st.subGroups.filter((g) => !gSet.has(g.id));
   });
 });
+
+test('30. Final Acceptance E2E: Huawei Cloud SG 3-Panel Coexistence (tz:8080 + fl:6366 + ng), Dual-Protocol HTTP/HTTPS Multiplexing & Caddyfile Isolation', async () => {
+  const https = require('node:https');
+  const { execSync } = require('node:child_process');
+
+  // 1. Verify store.state.panel mirror exists and matches settings for tz.sh option 11 compatibility
+  assert.ok(store.state.panel, 'store.state.panel mirror must exist for my-vps-probe tz.sh inspection');
+  assert.equal(store.state.panel.port, Number(store.state.settings.webPort));
+  assert.equal(store.state.panel.basePath, String(store.state.settings.webBasePath));
+
+  // 2. Verify nexusgate.sh has no destructive clear in show_menu and includes stty sane trap + Caddy domain block support
+  const ngSh = fs.readFileSync(path.join(__dirname, '..', 'nexusgate.sh'), 'utf8');
+  assert.ok(ngSh.includes("trap 'stty sane 2>/dev/null || true' EXIT INT TERM"), 'nexusgate.sh must protect terminal state with stty sane trap');
+  assert.ok(!/show_menu\(\)\s*\{\s*clear/.test(ngSh), 'nexusgate.sh show_menu must not call clear so FinalShell scrollback is preserved');
+  assert.ok(ngSh.includes('# BEGIN NEXUSGATE-PLUS') && ngSh.includes('# END NEXUSGATE-PLUS'), 'nexusgate.sh must use isolated # BEGIN NEXUSGATE-PLUS Caddy block');
+
+  // 3. Simulate 3-panel Caddyfile coexistence (# BEGIN MY-VPS-PROBE + # BEGIN NEXUS-FLUX + # BEGIN NEXUSGATE-PLUS)
+  const mockCaddy = path.join(tmpDir, 'Caddyfile.coexist');
+  fs.writeFileSync(mockCaddy, [
+    '# BEGIN MY-VPS-PROBE',
+    'tz01.vponlive.com {',
+    '    encode zstd gzip',
+    '    reverse_proxy 127.0.0.1:8080',
+    '}',
+    '# END MY-VPS-PROBE',
+    '',
+    '# BEGIN NEXUS-FLUX',
+    'zf.vponlive.com {',
+    '    encode gzip',
+    '    reverse_proxy 127.0.0.1:6366',
+    '}',
+    '# END NEXUS-FLUX',
+    ''
+  ].join('\n'));
+
+  // Simulate adding NexusGate-Plus block and updating it without touching Probe or Flux blocks
+  execSync(`sed -i '/# BEGIN NEXUSGATE-PLUS/,/# END NEXUSGATE-PLUS/d' "${mockCaddy}"`);
+  fs.appendFileSync(mockCaddy, `\n# BEGIN NEXUSGATE-PLUS\ncs.vponlive.com {\n    encode zstd gzip\n    reverse_proxy 127.0.0.1:${store.state.settings.webPort}\n}\n# END NEXUSGATE-PLUS\n`);
+  const caddyAfterAdd = fs.readFileSync(mockCaddy, 'utf8');
+  assert.ok(caddyAfterAdd.includes('tz01.vponlive.com') && caddyAfterAdd.includes('127.0.0.1:8080'), 'My-VPS-Probe Caddy block must remain intact');
+  assert.ok(caddyAfterAdd.includes('zf.vponlive.com') && caddyAfterAdd.includes('127.0.0.1:6366'), 'Nexus-Flux Caddy block must remain intact');
+  assert.ok(caddyAfterAdd.includes('cs.vponlive.com') && caddyAfterAdd.includes(`127.0.0.1:${store.state.settings.webPort}`), 'NexusGate-Plus Caddy block must be added cleanly');
+
+  // 4. Verify Dual-Protocol HTTP + HTTPS Multiplexing on the SAME port (so both direct https://ip:port/basePath/ and Caddy http://127.0.0.1:port work simultaneously!)
+  const { issueSelfSignedCert } = require('../lib/system');
+  const tlsCert = issueSelfSignedCert({ domain: 'cs.vponlive.com', ip: '127.0.0.1', baseDir: path.join(tmpDir, 'dual-tls-certs') });
+  const dualNetServer = (() => {
+    const cert = fs.readFileSync(tlsCert.certPath);
+    const key = fs.readFileSync(tlsCert.keyPath);
+    const httpsSrv = https.createServer({ cert, key }, handleRequest);
+    const httpSrv = http.createServer(handleRequest);
+    const net = require('node:net');
+    return net.createServer((socket) => {
+      socket.once('data', (chunk) => {
+        socket.pause();
+        const target = (chunk && chunk[0] === 0x16) ? httpsSrv : httpSrv;
+        socket.unshift(chunk);
+        target.emit('connection', socket);
+        process.nextTick(() => socket.resume());
+      });
+      socket.on('error', () => {});
+    });
+  })();
+
+  await new Promise((resolve) => dualNetServer.listen(0, '127.0.0.1', resolve));
+  const dualPort = dualNetServer.address().port;
+
+  try {
+    // 4a. Plain HTTP request to dualPort (simulating Caddy reverse_proxy 127.0.0.1:port)
+    const httpHealth = await new Promise((resolve, reject) => {
+      http.get(`http://127.0.0.1:${dualPort}/healthz`, (res) => {
+        let raw = '';
+        res.on('data', (c) => { raw += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(raw) }));
+      }).on('error', reject);
+    });
+    assert.equal(httpHealth.status, 200);
+    assert.equal(httpHealth.body.status, 'ok');
+
+    // 4b. HTTPS TLS request to the EXACT SAME dualPort (simulating direct browser https://domain:port/ access)
+    const httpsHealth = await new Promise((resolve, reject) => {
+      https.get(`https://127.0.0.1:${dualPort}/healthz`, { rejectUnauthorized: false }, (res) => {
+        let raw = '';
+        res.on('data', (c) => { raw += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(raw) }));
+      }).on('error', reject);
+    });
+    assert.equal(httpsHealth.status, 200);
+    assert.equal(httpsHealth.body.status, 'ok');
+  } finally {
+    await new Promise((resolve) => dualNetServer.close(resolve));
+  }
+
+  // 5. Verify remote Relay inbound on port 8080/6366 never triggers local Master port conflict or local socket polling
+  const remoteInb8080 = await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify({
+      nodeId: 'node_relay_hk',
+      remark: '远端中转与主控探针同端口隔离测试-8080',
+      protocol: 'vless',
+      port: 8080,
+      security: 'reality'
+    })
+  });
+  assert.equal(remoteInb8080.status, 201, 'Remote Relay should be allowed to use port 8080 even when Master runs probe-server on 8080');
+  const localSbCfg = singbox.writeConfig().config;
+  const localPorts = (localSbCfg.inbounds || []).map((i) => i.listen_port);
+  assert.ok(!localPorts.includes(8080), 'Local Master sing-box config must never bind remote Relay port 8080');
+});

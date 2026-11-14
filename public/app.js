@@ -297,6 +297,8 @@ function updateSidebarIndicator() {
   dot.className = 'live-dot';
   if (sb.state === 'running') {
     label.textContent = 'Sing-box 运行中';
+  } else if (state.settings?.pureMasterMode) {
+    label.textContent = '纯主控省内存模式';
   } else if (sb.state === 'error') {
     dot.classList.add('error');
     label.textContent = 'Sing-box 异常';
@@ -662,8 +664,8 @@ function renderOverview() {
             <h2>Sing-box 核心管理与版本切换</h2>
             <p>二进制路径: ${esc(sb.binary || '/usr/local/bin/sing-box')}</p>
           </div>
-          <span class="status ${sb.state === 'running' ? 'running' : (sb.state === 'error' ? 'error' : 'warning')}">
-            ${sb.state === 'running' ? '运行中' : (sb.state === 'error' ? '配置或进程异常' : '已停止 / 待启动')}
+          <span class="status ${(sb.state === 'running' || state.settings?.pureMasterMode) ? 'running' : (sb.state === 'error' ? 'error' : 'warning')}">
+            ${sb.state === 'running' ? '运行中' : (state.settings?.pureMasterMode ? '🍃 纯主控省内存模式' : (sb.state === 'error' ? '配置或进程异常' : '已停止 / 待启动'))}
           </span>
         </div>
         <div class="panel-body stack">
