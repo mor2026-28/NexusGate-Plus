@@ -492,7 +492,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.10 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.11 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -560,7 +560,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.10</span>
+          <span class="tag">NexusGate Plus v1.0.11</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -4757,28 +4757,28 @@ document.addEventListener('click', async (e) => {
       openSubGroupModal(null);
     }
     else if (action === 'edit-subgrp') {
-      const sg = (state.subGroups || []).find((x) => x.id === btn.dataset.id);
+      const sg = (state.subGroups || []).find((x) => x.id === actEl.dataset.id);
       if (sg) openSubGroupModal(sg);
     }
     else if (action === 'subgrp-links') {
-      const sg = (state.subGroups || []).find((x) => x.id === btn.dataset.id);
+      const sg = (state.subGroups || []).find((x) => x.id === actEl.dataset.id);
       if (sg) openSubGroupLinksModal(sg);
     }
     else if (action === 'subgrp-access') {
-      const sg = (state.subGroups || []).find((x) => x.id === btn.dataset.id);
+      const sg = (state.subGroups || []).find((x) => x.id === actEl.dataset.id);
       if (sg) openSubGroupAccessModal(sg);
     }
     else if (action === 'delete-subgrp') {
-      const sg = (state.subGroups || []).find((x) => x.id === btn.dataset.id);
-      openConfirmModal('删除组合订阅', `确定要删除组合订阅 [${sg?.name || btn.dataset.id}] 吗？删除后该订阅链接将立即失效（不影响原机器上的节点本身）。`, async () => {
-        await api(`/api/subcenter/groups/${btn.dataset.id}`, { method: 'DELETE' });
+      const sg = (state.subGroups || []).find((x) => x.id === actEl.dataset.id);
+      openConfirmModal('删除组合订阅', `确定要删除组合订阅 [${sg?.name || actEl.dataset.id}] 吗？删除后该订阅链接将立即失效（不影响原机器上的节点本身）。`, async () => {
+        await api(`/api/subcenter/groups/${actEl.dataset.id}`, { method: 'DELETE' });
         toast('组合订阅已删除');
         load('subcenter');
       });
     }
     else if (action === 'subgrp-action') {
-      const subAct = btn.dataset.subAct;
-      const res = await api(`/api/subcenter/groups/${btn.dataset.id}/action`, {
+      const subAct = actEl.dataset.subAct;
+      const res = await api(`/api/subcenter/groups/${actEl.dataset.id}/action`, {
         method: 'POST',
         body: JSON.stringify({ action: subAct })
       });
@@ -4794,7 +4794,7 @@ document.addEventListener('click', async (e) => {
       else if (subAct === 'clear-access' && res.subGroup) openSubGroupAccessModal(res.subGroup);
     }
     else if (action === 'toggle-all-subgrp') {
-      const checked = btn.checked;
+      const checked = actEl.checked;
       $$('.subgrp-check').forEach((c) => { c.checked = checked; });
     }
     else if (action === 'bulk-subgrp') {
@@ -4803,7 +4803,7 @@ document.addEventListener('click', async (e) => {
         toast('请先在表格左侧勾选至少 1 个组合订阅', true);
         return;
       }
-      const bulkAct = btn.dataset.bulk;
+      const bulkAct = actEl.dataset.bulk;
       const res = await api('/api/subcenter/groups/bulk', {
         method: 'POST',
         body: JSON.stringify({ ids, action: bulkAct })
@@ -4823,7 +4823,7 @@ document.addEventListener('click', async (e) => {
       openExternalNodeModal();
     }
     else if (action === 'delete-ext-node') {
-      await api(`/api/subcenter/external-nodes/${btn.dataset.id}`, { method: 'DELETE' });
+      await api(`/api/subcenter/external-nodes/${actEl.dataset.id}`, { method: 'DELETE' });
       toast('外部节点已删除');
       load('subcenter');
     }

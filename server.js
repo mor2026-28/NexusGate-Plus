@@ -83,7 +83,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.10';
+const VERSION = '1.0.11';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -3491,11 +3491,20 @@ async function handleRequest(req, res) {
       });
 
       const protoHint = store.state.settings?.webCertFile ? 'https' : 'http';
+      const buildResolvedItemsForGroup = (g) => collectSubGroupItems(store.state, g, reqHostHeader).map((it) => ({
+        name: it.link.name,
+        protocol: it.link.protocol || it.inbound?.protocol || 'vless',
+        uri: it.link.uri,
+        nodeId: it.nodeId || it.inbound?.nodeId || 'node_local',
+        nodeName: it.nodeName || '主控本机',
+        nodeDomain: it.nodeDomain || ''
+      }));
       return sendJson(res, 201, {
         subGroup: {
           ...newGroup,
           stats: computeSubGroupRuntimeStats(store.state, newGroup, singbox),
-          urls: buildSubscriptionFormatUrls(store.state, newGroup.token, reqHostHeader, protoHint)
+          urls: buildSubscriptionFormatUrls(store.state, newGroup.token, reqHostHeader, protoHint),
+          resolvedItems: buildResolvedItemsForGroup(newGroup)
         }
       });
     }
@@ -3595,11 +3604,20 @@ async function handleRequest(req, res) {
         store.addAudit(session.username, 'update_subgroup', existing.name);
       });
       const protoHint = store.state.settings?.webCertFile ? 'https' : 'http';
+      const buildResolvedItemsForGroup = (g) => collectSubGroupItems(store.state, g, reqHostHeader).map((it) => ({
+        name: it.link.name,
+        protocol: it.link.protocol || it.inbound?.protocol || 'vless',
+        uri: it.link.uri,
+        nodeId: it.nodeId || it.inbound?.nodeId || 'node_local',
+        nodeName: it.nodeName || '主控本机',
+        nodeDomain: it.nodeDomain || ''
+      }));
       return sendJson(res, 200, {
         subGroup: {
           ...updatedGroup,
           stats: computeSubGroupRuntimeStats(store.state, updatedGroup, singbox),
-          urls: buildSubscriptionFormatUrls(store.state, updatedGroup.token, reqHostHeader, protoHint)
+          urls: buildSubscriptionFormatUrls(store.state, updatedGroup.token, reqHostHeader, protoHint),
+          resolvedItems: buildResolvedItemsForGroup(updatedGroup)
         }
       });
     }
@@ -3646,12 +3664,21 @@ async function handleRequest(req, res) {
         store.addAudit(session.username, `subgroup_${act}`, g.name);
       });
       const protoHint = store.state.settings?.webCertFile ? 'https' : 'http';
+      const buildResolvedItemsForGroup = (g) => collectSubGroupItems(store.state, g, reqHostHeader).map((it) => ({
+        name: it.link.name,
+        protocol: it.link.protocol || it.inbound?.protocol || 'vless',
+        uri: it.link.uri,
+        nodeId: it.nodeId || it.inbound?.nodeId || 'node_local',
+        nodeName: it.nodeName || '主控本机',
+        nodeDomain: it.nodeDomain || ''
+      }));
       return sendJson(res, 200, {
         ok: true,
         subGroup: {
           ...updatedGroup,
           stats: computeSubGroupRuntimeStats(store.state, updatedGroup, singbox),
-          urls: buildSubscriptionFormatUrls(store.state, updatedGroup.token, reqHostHeader, protoHint)
+          urls: buildSubscriptionFormatUrls(store.state, updatedGroup.token, reqHostHeader, protoHint),
+          resolvedItems: buildResolvedItemsForGroup(updatedGroup)
         }
       });
     }

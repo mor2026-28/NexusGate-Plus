@@ -3860,3 +3860,64 @@ test('31. Real-World Multi-Panel Migration Audit: Per-Machine ping0.cc Rule Isol
   assert.equal(hasPingA, true, 'DMIT-EB49 must keep its ping0.cc block rule');
   assert.equal(hasPingB, false, 'HuaNa-JP must NOT inherit ping0.cc block rule from DMIT-EB49');
 });
+
+test('32. SubCenter Frontend & API Full-Lifecycle E2E: Create -> Immediate resolvedItems in QR Modal -> Edit -> Rotate Token -> Access -> Toggle -> Delete -> External Nodes -> Zero btn ReferenceError', async () => {
+  // 1. Verify public/app.js has zero undefined `btn.` references in click handler
+  const appJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  assert.equal(/\bbtn\.(dataset|checked)\b/.test(appJs), false, 'public/app.js must not reference undefined btn variable');
+
+  // 2. Import an external node
+  const extAddRes = await req('/SecPath16Chars99/api/subcenter/external-nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      uris: 'vless://66666666-2222-4333-8444-555555555555@198.51.100.88:443?security=tls&sni=ext-test.vponlive.com#Ext-Test-Node',
+      groupName: '外部专线'
+    })
+  });
+  assert.equal(extAddRes.status, 201);
+  const extId = extAddRes.json.items[0].id;
+
+  // 3. Create a Custom Subscription Group referencing that external node and verify resolvedItems is populated immediately (NOT 0 nodes!)
+  const createRes = await req('/SecPath16Chars99/api/subcenter/groups', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'SubCenter-E2E-Test',
+      groupName: 'VIP客户组',
+      selectedItems: [extId],
+      ipLimit: 3,
+      deviceLimit: 5
+    })
+  });
+  assert.equal(createRes.status, 201);
+  const grp = createRes.json.subGroup;
+  assert.ok(Array.isArray(grp.resolvedItems) && grp.resolvedItems.length === 1, 'POST /api/subcenter/groups must immediately return resolvedItems.length === 1');
+
+  // 4. Edit group and verify resolvedItems still populated
+  const editRes = await req(`/SecPath16Chars99/api/subcenter/groups/${grp.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      name: 'SubCenter-E2E-Edited',
+      selectedItems: [extId],
+      ipLimit: 2,
+      deviceLimit: 2
+    })
+  });
+  assert.equal(editRes.status, 200);
+  assert.equal(editRes.json.subGroup.resolvedItems.length, 1);
+
+  // 5. Rotate token, reset traffic, clear access, toggle
+  for (const act of ['rotate-token', 'reset-traffic', 'clear-access', 'toggle']) {
+    const actRes = await req(`/SecPath16Chars99/api/subcenter/groups/${grp.id}/action`, {
+      method: 'POST',
+      body: JSON.stringify({ action: act })
+    });
+    assert.equal(actRes.status, 200);
+    assert.equal(actRes.json.subGroup.resolvedItems.length, 1, `Action ${act} must return populated resolvedItems`);
+  }
+
+  // 6. Delete group & delete external node
+  const delGrpRes = await req(`/SecPath16Chars99/api/subcenter/groups/${grp.id}`, { method: 'DELETE' });
+  assert.equal(delGrpRes.status, 200);
+  const delExtRes = await req(`/SecPath16Chars99/api/subcenter/external-nodes/${extId}`, { method: 'DELETE' });
+  assert.equal(delExtRes.status, 200);
+});
