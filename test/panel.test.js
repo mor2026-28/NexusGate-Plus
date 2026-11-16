@@ -3865,6 +3865,7 @@ test('32. SubCenter Frontend & API Full-Lifecycle E2E: Create -> Immediate resol
   // 1. Verify public/app.js has zero undefined `btn.` references in click handler
   const appJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   assert.equal(/\bbtn\.(dataset|checked)\b/.test(appJs), false, 'public/app.js must not reference undefined btn variable');
+  assert.ok(appJs.includes('function openConfirmModal('), 'public/app.js must define openConfirmModal for delete confirmations');
 
   // 2. Import an external node
   const extAddRes = await req('/SecPath16Chars99/api/subcenter/external-nodes', {
@@ -3920,4 +3921,25 @@ test('32. SubCenter Frontend & API Full-Lifecycle E2E: Create -> Immediate resol
   assert.equal(delGrpRes.status, 200);
   const delExtRes = await req(`/SecPath16Chars99/api/subcenter/external-nodes/${extId}`, { method: 'DELETE' });
   assert.equal(delExtRes.status, 200);
+
+  // 7. 1,000-iteration SubCenter format & token rendering simulation
+  const { formatSubscription } = require('../lib/subscriptions');
+  const simCreate = await req('/SecPath16Chars99/api/subcenter/groups', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Stress1000',
+      customUris: ['vless://77777777-2222-4333-8444-555555555555@203.0.113.77:443?security=tls&sni=stress1000.vponlive.com#Stress-Node'],
+      ipLimit: 5,
+      deviceLimit: 5
+    })
+  });
+  assert.equal(simCreate.status, 201);
+  const simTok = simCreate.json.subGroup.token;
+  const fmts = ['base64', 'clash', 'singbox', 'surge'];
+  for (let i = 0; i < 1000; i += 1) {
+    const out = formatSubscription(store.state, simTok, fmts[i % fmts.length], 'zz.vponlive.com:19541');
+    assert.ok(out && out.body.length > 30);
+  }
+  const simDel = await req(`/SecPath16Chars99/api/subcenter/groups/${simCreate.json.subGroup.id}`, { method: 'DELETE' });
+  assert.equal(simDel.status, 200);
 });
