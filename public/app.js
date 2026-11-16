@@ -492,7 +492,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.9 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.10 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -560,7 +560,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.9</span>
+          <span class="tag">NexusGate Plus v1.0.10</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -851,16 +851,7 @@ function renderCluster() {
 
   return `
 
-    <div class="notice" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;border-left:4px solid var(--success)">
-      <div style="flex:1;min-width:260px">
-        <b style="color:var(--success)">🛡️ 控制面与数据面彻底解耦（主控宕机 = 全部节点 0 掉线 · 0 超时）+ 主控双活热备 (Master HA)</b><br>
-        <span>所有中转机与落地机的 <code>sing-box</code> 节点与 SSL 证书均在子机器本地独立持久化守护运行：<b>即使主控面板机故障或断网，全部客户节点与中转转发依然 100% 正常高速连通，绝不超时掉线</b>！同时支持配置「备用主控热备同步」，主力主控故障时由备用主控秒级接管。</span>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${state.settings?.standbyMasterUrl ? '<button class="primary" data-action="push-master-ha-sync">🔄 立即同步至备用主控</button>' : '<button class="primary" data-action="jump-settings">🛡️ 配置备用主控热备</button>'}
-        ${state.settings?.masterHaRole === 'standby' ? '<button class="warning" data-action="trigger-master-ha-takeover">⚡ 备用主控一键接管集群</button>' : ''}
-      </div>
-    </div>
+
 
     <section class="metrics-4">
       <article class="metric" style="--accent:#2563eb">

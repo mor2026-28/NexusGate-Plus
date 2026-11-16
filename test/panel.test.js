@@ -3661,6 +3661,8 @@ test('29. v1.0.8 Huawei Cloud SG 456MB Low-RAM Master Benchmark: Pure Master Mod
 test('30. Final Acceptance E2E: Huawei Cloud SG 3-Panel Coexistence (tz:8080 + fl:6366 + ng), Dual-Protocol HTTP/HTTPS Multiplexing & Caddyfile Isolation', async () => {
   const https = require('node:https');
   const { execSync } = require('node:child_process');
+  const { parse3xuiPayload, apply3xuiMigration } = require('../lib/migrate3xui');
+  const { compileNodeSingboxConfig } = require('../lib/cluster');
 
   // 1. Verify store.state.panel mirror exists and matches settings for tz.sh option 11 compatibility
   assert.ok(store.state.panel, 'store.state.panel mirror must exist for my-vps-probe tz.sh inspection');
@@ -3783,3 +3785,78 @@ test('30. Final Acceptance E2E: Huawei Cloud SG 3-Panel Coexistence (tz:8080 + f
   assert.equal(localMasterNode.domain, 'zz.vponlive.com', 'Local Master node domain must sync to zz.vponlive.com');
 });
 
+
+test('31. Real-World Multi-Panel Migration Audit: Per-Machine ping0.cc Rule Isolation, NexusGate .tar.gz Backup Import, Wildcard Cert Match & Banner Removal', async () => {
+  const { execSync } = require('node:child_process');
+
+  // 1. Verify overview decouple banner was removed from public/app.js
+  const appJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  assert.ok(!appJs.includes('控制面与数据面彻底解耦（主控宕机 = 全部节点 0 掉线'), 'Overview decouple banner must be removed per user request');
+
+  // 2. Verify wildcard tlsDomain (*.legjp.018.qzz.io) matches legjp.018.qzz.io cert
+  const { certMatchesDomain } = require('../lib/protocols');
+  assert.equal(certMatchesDomain('legjp.018.qzz.io', '*.legjp.018.qzz.io'), true, 'Wildcard tlsDomain must match apex domain cert');
+
+  // 3. Create a mock NexusGate .tar.gz archive (like ppf nexusgate-backup-*.tar.gz) and verify parse3xuiPayload + apply3xuiMigration
+  const ngTarTmp = path.join(tmpDir, 'ng-tar-src');
+  fs.mkdirSync(path.join(ngTarTmp, 'var', 'lib', 'nexusgate'), { recursive: true });
+  fs.writeFileSync(path.join(ngTarTmp, 'var', 'lib', 'nexusgate', 'nexusgate.json'), JSON.stringify({
+    version: 1.0,
+    inbounds: [{
+      id: 'in_ppf_1',
+      tag: 'inbound-31001',
+      remark: 'PPF-JP-Reality',
+      protocol: 'vless',
+      port: 31001,
+      security: 'reality',
+      enable: true,
+      outboundTag: 'direct',
+      clients: [{ id: '11111111-2222-4333-8444-555555555555', email: 'ppf_user', enable: true }]
+    }],
+    outbounds: [
+      { id: 'out_direct', tag: 'direct', type: 'direct', builtin: true, enabled: true },
+      { id: 'out_ppf_exit', tag: 'ppf-exit-ss', type: 'shadowsocks', server: '198.51.100.77', port: 28388, method: '2022-blake3-aes-128-gcm', password: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', enabled: true }
+    ],
+    routing: { rules: [{ id: 'r_ppf_1', remark: '入站转发: inbound-31001 ➔ ppf-exit-ss', action: 'route', inbound: ['inbound-31001'], outbound: 'ppf-exit-ss', enabled: true }] }
+  }));
+  const ngTarPath = path.join(tmpDir, 'ppf-nexusgate-backup.tar.gz');
+  execSync(`tar -czf "${ngTarPath}" -C "${ngTarTmp}" .`);
+
+  const { parse3xuiPayload, apply3xuiMigration } = require('../lib/migrate3xui');
+  const { compileNodeSingboxConfig } = require('../lib/cluster');
+  const parsedNgTar = parse3xuiPayload({ dbPath: ngTarPath, dryRun: false });
+  assert.equal(parsedNgTar.sourceType, 'nexusgate-tar');
+  assert.equal(parsedNgTar.inbounds.length, 1);
+
+  const ppfRec = apply3xuiMigration(store, parsedNgTar, 'merge', {
+    targetNodeId: '__create__',
+    nodeName: 'PPF-Tar-Relay',
+    nodeDomain: 'ppf.onliveme.com',
+    nodeIp: '198.51.100.55'
+  });
+  assert.equal(ppfRec.inboundsCount, 1);
+
+  // 4. Verify per-machine ping0.cc block rule isolation across two different migrated Relays
+  const resPingA = apply3xuiMigration(store, {
+    summary: { inboundsCount: 1, clientsCount: 1, outboundsCount: 0, rulesCount: 1, protocols: ['vless'], restoredCertsCount: 0, restoredCertDomains: [] },
+    inbounds: [{ tag: 'inbound-40101', remark: 'DMIT-Node', protocol: 'vless', port: 40101, security: 'reality', enable: true, clients: [{ id: '22222222-2222-4333-8444-555555555555', email: 'dmit_u', enable: true }] }],
+    outbounds: [],
+    rules: [{ remark: '禁止 ping0.cc', action: 'route', outbound: 'block', inbound: [], domain: ['ping0.cc', 'domain:ping0.cc'], enabled: true }],
+    restoredCerts: []
+  }, 'merge', { targetNodeId: '__create__', nodeName: 'DMIT-EB49-Sim', nodeDomain: 'eb.362353.xyz', nodeIp: '198.51.100.61' });
+
+  const resNoPingB = apply3xuiMigration(store, {
+    summary: { inboundsCount: 1, clientsCount: 1, outboundsCount: 0, rulesCount: 0, protocols: ['vless'], restoredCertsCount: 0, restoredCertDomains: [] },
+    inbounds: [{ tag: 'inbound-40101', remark: 'HuaNa-Node', protocol: 'vless', port: 40101, security: 'reality', enable: true, clients: [{ id: '33333333-2222-4333-8444-555555555555', email: 'hn_u', enable: true }] }],
+    outbounds: [],
+    rules: [],
+    restoredCerts: []
+  }, 'merge', { targetNodeId: '__create__', nodeName: 'HuaNa-JP-Sim', nodeDomain: 'hn.onliveme.com', nodeIp: '198.51.100.62' });
+
+  const cfgA = compileNodeSingboxConfig(store.state, resPingA.targetNodeId).singboxConfig;
+  const cfgB = compileNodeSingboxConfig(store.state, resNoPingB.targetNodeId).singboxConfig;
+  const hasPingA = cfgA.route.rules.some((r) => r.outbound === 'block' && r.domain_suffix?.includes('ping0.cc'));
+  const hasPingB = cfgB.route.rules.some((r) => r.outbound === 'block' && r.domain_suffix?.includes('ping0.cc'));
+  assert.equal(hasPingA, true, 'DMIT-EB49 must keep its ping0.cc block rule');
+  assert.equal(hasPingB, false, 'HuaNa-JP must NOT inherit ping0.cc block rule from DMIT-EB49');
+});
