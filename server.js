@@ -83,7 +83,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.12';
+const VERSION = '1.0.13';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -3327,6 +3327,18 @@ async function handleRequest(req, res) {
     }
 
     // 14.5 Custom Multi-Node Subscription Center (SubVault · 跨机自由选节点组合订阅中心)
+
+    if (pathname === '/api/audit/clear' && method === 'DELETE') {
+      const logType = String(url.searchParams.get('type') || 'all').trim();
+      store.transact((st) => {
+        if (logType === 'audit' || logType === 'all') st.audit = [];
+        if (logType === 'failover' || logType === 'all') st.failoverLogs = [];
+        if (logType === 'sublogs' || logType === 'all') st.subAccessLogs = [];
+        if (logType === 'migrations' || logType === 'all') st.migrations = [];
+      });
+      return sendJson(res, 200, { ok: true, type: logType });
+    }
+
     if (pathname === '/api/subcenter' && method === 'GET') {
       ensureClusterNodes(store.state);
       const protoHint = store.state.settings?.webCertFile ? 'https' : 'http';

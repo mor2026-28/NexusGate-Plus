@@ -3943,3 +3943,50 @@ test('32. SubCenter Frontend & API Full-Lifecycle E2E: Create -> Immediate resol
   const simDel = await req(`/SecPath16Chars99/api/subcenter/groups/${simCreate.json.subGroup.id}`, { method: 'DELETE' });
   assert.equal(simDel.status, 200);
 });
+
+test('33. SubCenter Bulk Operations (enable/disable/renew30d/clear-access/delete) + Clear Audit/Failover/SubLogs/Migrations + Zero Single-$ Array Bug', async () => {
+  const appJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  assert.equal(/(^|[^$])\$\([^)]+\)\.(map|forEach|filter|slice|reduce|some|every|find)\b/.test(appJs), false, 'public/app.js must never call array methods on single-$ querySelector');
+
+  // 1. Create 2 custom subscription groups for bulk operations
+  const g1 = await req('/SecPath16Chars99/api/subcenter/groups', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Bulk-1',
+      customUris: ['vless://88888888-2222-4333-8444-555555555555@203.0.113.81:443?security=tls&sni=b1.vponlive.com#B1']
+    })
+  });
+  const g2 = await req('/SecPath16Chars99/api/subcenter/groups', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Bulk-2',
+      customUris: ['vless://99999999-2222-4333-8444-555555555555@203.0.113.82:443?security=tls&sni=b2.vponlive.com#B2']
+    })
+  });
+  assert.equal(g1.status, 201);
+  assert.equal(g2.status, 201);
+  const ids = [g1.json.subGroup.id, g2.json.subGroup.id];
+
+  // 2. Test bulk disable -> enable -> renew30d -> clear-access -> delete
+  for (const act of ['disable', 'enable', 'renew30d', 'clear-access', 'delete']) {
+    const bRes = await req('/SecPath16Chars99/api/subcenter/groups/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ ids, action: act })
+    });
+    assert.equal(bRes.status, 200, `Bulk action ${act} must return 200`);
+    assert.equal(bRes.json.affected, 2, `Bulk action ${act} must affect both groups`);
+  }
+
+  // 3. Test clearing all 4 audit/history log types
+  store.transact((st) => {
+    st.audit.push({ id: 'a1', at: new Date().toISOString(), actor: 'admin', action: 'test', target: 'x' });
+    st.failoverLogs.push({ id: 'f1', at: new Date().toISOString(), action: 'failover', detail: 'x' });
+    st.subAccessLogs.push({ id: 's1', at: new Date().toISOString(), groupName: 'x', allowed: true });
+    st.migrations.push({ id: 'm1', at: new Date().toISOString(), mode: 'merge' });
+  });
+  for (const [type, key] of [['audit', 'audit'], ['failover', 'failoverLogs'], ['sublogs', 'subAccessLogs'], ['migrations', 'migrations']]) {
+    const cRes = await req(`/SecPath16Chars99/api/audit/clear?type=${type}`, { method: 'DELETE' });
+    assert.equal(cRes.status, 200);
+    assert.equal(store.state[key].length, 0, `DELETE /api/audit/clear?type=${type} must clear ${key}`);
+  }
+});

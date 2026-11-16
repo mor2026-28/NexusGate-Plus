@@ -524,7 +524,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.12 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.13 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -592,7 +592,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.12</span>
+          <span class="tag">NexusGate Plus v1.0.13</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -741,9 +741,10 @@ function renderOverview() {
     <section class="panel">
       <div class="panel-head">
         <div><h2>最近操作审计日志</h2><p>记录面板登录、节点变更、内核加速、路由转发与备份迁移事件</p></div>
-        <div style="display:flex;gap:8px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="primary" data-action="quick-add-inbound">＋ 添加入站节点</button>
           <button class="ghost" data-action="Switch-to-routing">◇ 路由转发管理</button>
+          <button class="danger" data-action="clear-audit-logs" data-log-type="audit" data-page-target="overview">🗑 清空审计</button>
         </div>
       </div>
       <div class="panel-body">
@@ -983,7 +984,10 @@ function renderCluster() {
           <h2>秒级容灾切换与 Cloudflare DNS 漂移审计</h2>
           <p>当主力中转机故障时，热备机实时镜像接管全部端口与 SSL 证书，并通过 Cloudflare API 秒级切换域名解析 IP，无需重装 3x-ui 导备份</p>
         </div>
-        <button data-action="jump-migrate">⇩ 多机 3x-ui 批量无损归并 →</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button data-action="jump-migrate">⇩ 多机 3x-ui 批量无损归并 →</button>
+          <button class="danger" data-action="clear-audit-logs" data-log-type="failover" data-page-target="cluster">🗑 清空审计</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
@@ -1888,7 +1892,10 @@ function renderSubCenter() {
             <h2>订阅拉取与设备/IP 超限拦截审计日志</h2>
             <p>实时记录每次客户端拉取订阅的公网 IP、设备型号/UA、输出格式及超限拦截原因</p>
           </div>
-          <span class="tag tls">最近 ${logs.length} 条记录</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="tag tls">最近 ${logs.length} 条记录</span>
+            <button class="danger" data-action="clear-audit-logs" data-log-type="sublogs" data-page-target="subcenter">🗑 清空日志</button>
+          </div>
         </div>
         <div class="table-wrap">
           <table>
@@ -2325,6 +2332,7 @@ function renderMigrate() {
     <section class="panel">
       <div class="panel-head">
         <div><h2>历史迁移记录</h2><p>历次数据与证书迁移导入审计</p></div>
+        <button class="danger" data-action="clear-audit-logs" data-log-type="migrations" data-page-target="migrate">🗑 清空记录</button>
       </div>
       <div class="table-wrap">
         <table>
@@ -4830,7 +4838,7 @@ document.addEventListener('click', async (e) => {
       $$('.subgrp-check').forEach((c) => { c.checked = checked; });
     }
     else if (action === 'bulk-subgrp') {
-      const ids = $('.subgrp-check:checked').map((c) => c.value);
+      const ids = $$('.subgrp-check:checked').map((c) => c.value);
       if (!ids.length) {
         toast('请先在表格左侧勾选至少 1 个组合订阅', true);
         return;
@@ -4860,6 +4868,22 @@ document.addEventListener('click', async (e) => {
     }
     else if (action === 'add-ext-node') {
       openExternalNodeModal();
+    }
+
+    else if (action === 'clear-audit-logs') {
+      const logType = actEl.dataset.logType || 'all';
+      const pageTarget = actEl.dataset.pageTarget || state.page;
+      const labelMap = {
+        audit: '最近操作审计日志',
+        failover: '容灾切换与 Cloudflare DNS 漂移审计',
+        sublogs: '订阅拉取与设备/IP 超限拦截日志',
+        migrations: '历史迁移记录'
+      };
+      openConfirmModal('清空历史记录', `确定要清空全部「${labelMap[logType] || '历史审计日志'}」吗？清空后无法恢复（不影响任何节点与订阅配置）。`, async () => {
+        await api(`/api/audit/clear?type=${encodeURIComponent(logType)}`, { method: 'DELETE' });
+        toast('历史审计记录已清空');
+        load(pageTarget);
+      });
     }
     else if (action === 'delete-ext-node') {
       const extId = actEl.dataset.id;
