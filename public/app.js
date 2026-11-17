@@ -524,7 +524,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.13 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.14 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -592,7 +592,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.13</span>
+          <span class="tag">NexusGate Plus v1.0.14</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>

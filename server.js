@@ -83,7 +83,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.13';
+const VERSION = '1.0.14';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -188,9 +188,9 @@ function bindCertificateEverywhere(st, cert, applyToPanel = true, applyToNodes =
 let _lastSyncCertsAt = 0;
 function syncDiscoveredCerts(force = false) {
   const now = Date.now();
-  if (!force && _lastSyncCertsAt > 0 && now - _lastSyncCertsAt < 30000) return;
-  _lastSyncCertsAt = now;
-  const discovered = discoverSystemCertificates(force);
+  const shouldScanDisk = force || _lastSyncCertsAt === 0 || (now - _lastSyncCertsAt >= 30000);
+  if (shouldScanDisk) _lastSyncCertsAt = now;
+  const discovered = shouldScanDisk ? discoverSystemCertificates(force) : [];
   let changed = false;
   const prevPanelCert = store.state.settings.webCertFile || '';
   const deletedDomains = new Set(store.state.settings.deletedCertDomains || []);
@@ -254,16 +254,36 @@ function syncDiscoveredCerts(force = false) {
     changed = true;
   }
 
-  // If a backup migration restored a specific certificate (e.g. vm.362353.xyz) and an older version
-  // accidentally bound a different discovered cert, automatically prioritize the migrated certificate once
-  const lastMigDomain = store.state.migrations?.[0]?.restoredCertDomains?.[0] || '';
-  if (lastMigDomain && !store.state.settings._migratedCertHealed && store.state.settings.webDomain !== lastMigDomain) {
-    const migCert = store.state.certificates.find(
-      (c) => c.domain === lastMigDomain && c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false
+  // Collect domains belonging exclusively to remote Relay/Exit/Standby nodes so Master Panel never gets hijacked by a remote node's cert
+  const remoteNodeDomains = new Set();
+  for (const n of store.state.nodes || []) {
+    if (!n.isLocal) {
+      if (n.domain) remoteNodeDomains.add(String(n.domain).trim().toLowerCase());
+      if (n.host && !net.isIP(n.host)) remoteNodeDomains.add(String(n.host).trim().toLowerCase());
+    }
+  }
+  for (const m of store.state.migrations || []) {
+    if (m.targetNodeId && m.targetNodeId !== 'node_local') {
+      if (m.targetDomain) remoteNodeDomains.add(String(m.targetDomain).trim().toLowerCase());
+      for (const d of m.restoredCertDomains || []) {
+        if (d) remoteNodeDomains.add(String(d).trim().toLowerCase());
+      }
+    }
+  }
+
+  // Self-heal if Master Panel webDomain or localNode.domain was accidentally overwritten by a remote Relay's domain (e.g. vm.362353.xyz)
+  const curWebDomLower = String(store.state.settings.webDomain || '').trim().toLowerCase();
+  if (curWebDomLower && remoteNodeDomains.has(curWebDomLower)) {
+    const masterOwnCert = (store.state.certificates || []).find(
+      (c) =>
+        c.type !== 'self-signed' &&
+        !c.isSelfSigned &&
+        c.valid !== false &&
+        !isProbeOrOtherDomain(c.domain) &&
+        !remoteNodeDomains.has(String(c.domain || '').trim().toLowerCase())
     );
-    if (migCert) {
-      store.state.settings._migratedCertHealed = true;
-      bindCertificateEverywhere(store.state, migCert, true, true, true);
+    if (masterOwnCert) {
+      bindCertificateEverywhere(store.state, masterOwnCert, true, true, false);
       changed = true;
     }
   }
@@ -274,7 +294,8 @@ function syncDiscoveredCerts(force = false) {
       (c.certPath === curCertPath || (store.state.settings.webDomain && c.domain === store.state.settings.webDomain)) &&
       c.type !== 'self-signed' &&
       !c.isSelfSigned &&
-      c.valid !== false
+      c.valid !== false &&
+      !remoteNodeDomains.has(String(c.domain || '').trim().toLowerCase())
   );
 
   if (activeRealCert) {
@@ -288,12 +309,18 @@ function syncDiscoveredCerts(force = false) {
       changed = true;
     }
   } else {
-    const bestRealCert = store.state.certificates.find((c) => c.type !== 'self-signed' && !c.isSelfSigned && c.valid !== false);
+    const bestRealCert = store.state.certificates.find(
+      (c) =>
+        c.type !== 'self-signed' &&
+        !c.isSelfSigned &&
+        c.valid !== false &&
+        !remoteNodeDomains.has(String(c.domain || '').trim().toLowerCase())
+    );
     if (bestRealCert) {
       bindCertificateEverywhere(store.state, bestRealCert, true, true, true);
       changed = true;
     } else if (!store.state.settings.defaultCertFile && store.state.certificates[0]) {
-      const c0 = store.state.certificates[0];
+      const c0 = store.state.certificates.find((c) => !remoteNodeDomains.has(String(c.domain || '').trim().toLowerCase())) || store.state.certificates[0];
       store.state.settings.defaultTlsDomain = c0.domain;
       store.state.settings.defaultCertFile = c0.certPath;
       store.state.settings.defaultKeyFile = c0.keyPath;
@@ -1566,6 +1593,22 @@ async function handleRequest(req, res) {
       }
     }
 
+    // 2.4 Public Self-Hosted Cluster Agent Scripts (so remote Relay/Exit nodes always fetch exact matching version directly from Master Panel)
+    if ((rawPathname === "/api/cluster/install-agent.sh" || strippedForSub === "/api/cluster/install-agent.sh") && method === "GET") {
+      const scriptPath = path.join(APP_ROOT, "scripts", "install-agent.sh");
+      const content = fs.readFileSync(scriptPath, "utf8");
+      res.writeHead(200, { "content-type": "text/x-shellscript; charset=utf-8", "cache-control": "no-store" });
+      res.end(content);
+      return;
+    }
+    if ((rawPathname === "/api/cluster/nexus-agent.js" || strippedForSub === "/api/cluster/nexus-agent.js") && method === "GET") {
+      const agentPath = path.join(APP_ROOT, "agent", "nexus-agent.js");
+      const content = fs.readFileSync(agentPath, "utf8");
+      res.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store" });
+      res.end(content);
+      return;
+    }
+
     // 2.5 Public Cluster Agent Heartbeat & Master-Standby HA Sync (Token / HMAC Authenticated across any webBasePath)
     if ((rawPathname === "/api/cluster/heartbeat" || strippedForSub === "/api/cluster/heartbeat") && method === "POST") {
       const body = await readJson(req);
@@ -2650,8 +2693,7 @@ async function handleRequest(req, res) {
         `入站 ${record.inboundsCount} 个 / 出站 ${record.outboundsCount} 个 / 规则 ${record.rulesCount} 条${record.restoredCertsCount ? ` / 证书 ${record.restoredCertsCount} 张` : ''}`
       ));
       const allPorts = (store.state.inbounds || []).filter((i) => i.enable !== false).map((i) => i.port);
-      openFirewallPorts(allPorts);
-      autoApplyIfEnabled();
+      autoApplyIfEnabled(allPorts);
       if (store.state.settings.webCertFile && store.state.settings.webCertFile !== prevPanelCert) {
         setTimeout(() => restartPanelServer(), 300);
       }
@@ -3912,7 +3954,7 @@ function startPanelServer(callback) {
 }
 
 function restartPanelServer() {
-  if (!activeServer) return;
+  if (!activeServer || process.env.NG_TEST_MODE === '1') return;
   const prev = activeServer;
   activeServer = null;
   try {

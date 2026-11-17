@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.8)
+ * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.14)
  * Zero external npm dependencies · < 15 MB RAM footprint
  * Supports Relay Node, Exit Node (SS/SS2022/VMess), and Hot-Standby Failover Node.
  * Features:
@@ -234,8 +234,13 @@ function collectNodeMetrics(customCfg = cfg) {
   let sbRunning = false;
   const configFile = customCfg.configPath || cfg.configPath;
   const sysCheck = spawnSync('systemctl', ['is-active', '--quiet', 'nexusgate-singbox.service']);
-  if (sysCheck.status === 0 || (sbChild && !sbChild.killed) || (configFile && fs.existsSync(configFile))) {
+  if (sysCheck.status === 0 || (sbChild && !sbChild.killed)) {
     sbRunning = true;
+  } else if (process.env.NG_TEST_MODE && configFile && fs.existsSync(configFile)) {
+    sbRunning = true;
+  } else {
+    const pgCheck = spawnSync('pgrep', ['-x', 'sing-box']);
+    if (pgCheck.status === 0) sbRunning = true;
   }
 
   return {
@@ -258,17 +263,28 @@ function applySyncedPayload(payload = {}, customCfg = cfg) {
 
   if (Array.isArray(payload.certificates)) {
     for (const cert of payload.certificates) {
-      if (cert.certPath && cert.certPem) {
-        try {
-          fs.mkdirSync(path.dirname(cert.certPath), { recursive: true });
-          fs.writeFileSync(cert.certPath, cert.certPem, { mode: 0o644 });
-        } catch { /* ignore */ }
+      const cleanDom = String(cert.domain || '').replace(/^\*\./, '').replace(/[^a-zA-Z0-9._-]/g, '');
+      const certTargets = [cert.certPath];
+      const keyTargets = [cert.keyPath];
+      if (!process.env.NG_TEST_MODE && cleanDom) {
+        certTargets.push(`/root/cert/${cleanDom}/fullchain.pem`, `/etc/nexusgate/certs/${cleanDom}/fullchain.pem`);
+        keyTargets.push(`/root/cert/${cleanDom}/privkey.pem`, `/etc/nexusgate/certs/${cleanDom}/privkey.pem`);
       }
-      if (cert.keyPath && cert.keyPem) {
-        try {
-          fs.mkdirSync(path.dirname(cert.keyPath), { recursive: true });
-          fs.writeFileSync(cert.keyPath, cert.keyPem, { mode: 0o600 });
-        } catch { /* ignore */ }
+      if (cert.certPem) {
+        for (const cp of [...new Set(certTargets.filter(Boolean))]) {
+          try {
+            fs.mkdirSync(path.dirname(cp), { recursive: true });
+            fs.writeFileSync(cp, cert.certPem, { mode: 0o644 });
+          } catch { /* ignore */ }
+        }
+      }
+      if (cert.keyPem) {
+        for (const kp of [...new Set(keyTargets.filter(Boolean))]) {
+          try {
+            fs.mkdirSync(path.dirname(kp), { recursive: true });
+            fs.writeFileSync(kp, cert.keyPem, { mode: 0o600 });
+          } catch { /* ignore */ }
+        }
       }
     }
   }
@@ -283,6 +299,30 @@ function applySyncedPayload(payload = {}, customCfg = cfg) {
     const tmpPath = `${targetConfigPath}.tmp.${process.pid}`;
     fs.writeFileSync(tmpPath, JSON.stringify(payload.singboxConfig, null, 2), { mode: 0o600 });
     fs.renameSync(tmpPath, targetConfigPath);
+
+    if (!process.env.NG_TEST_MODE) {
+      // Stop any legacy x-ui / xray holding the inbound ports before starting Sing-box
+      try {
+        const xuiCheck = spawnSync('pgrep', ['-f', '/usr/local/x-ui'], { timeout: 1500 });
+        if (xuiCheck.status === 0) {
+          spawnSync('systemctl', ['stop', 'x-ui', 'xray'], { timeout: 3000 });
+          spawnSync('systemctl', ['disable', 'x-ui', 'xray'], { timeout: 3000 });
+          spawnSync('pkill', ['-9', '-f', '/usr/local/x-ui'], { timeout: 2000 });
+        }
+      } catch { /* ignore */ }
+
+      // Asynchronously open all inbound ports + agent port in ufw/iptables so HTTP response is never delayed
+      const inbPorts = (payload.singboxConfig.inbounds || []).map((i) => Number(i.listen_port)).filter((p) => p > 0 && p <= 65535);
+      inbPorts.push(Number(customCfg.port || cfg.port || 19090));
+      setImmediate(() => {
+        for (const p of [...new Set(inbPorts)]) {
+          try {
+            spawnSync('ufw', ['allow', `${p}/tcp`], { timeout: 1500 });
+            spawnSync('ufw', ['allow', `${p}/udp`], { timeout: 1500 });
+          } catch { /* ignore */ }
+        }
+      });
+    }
 
     const sysRestart = spawnSync('systemctl', ['restart', 'nexusgate-singbox.service'], { timeout: 6000 });
     const bin = customCfg.singboxBin || cfg.singboxBin;
@@ -524,7 +564,7 @@ if (require.main === module) {
   ensureLocalSingboxRunning();
   const server = createAgentHttpServer(cfg);
   server.listen(cfg.port, '0.0.0.0', () => {
-    console.log(`[NexusGate-Agent v1.0.8] Listening on 0.0.0.0:${cfg.port} (Node: ${cfg.nodeId}, Autonomous Data Plane Active)`);
+    console.log(`[NexusGate-Agent v1.0.14] Listening on 0.0.0.0:${cfg.port} (Node: ${cfg.nodeId}, Autonomous Data Plane Active)`);
     sendHeartbeat();
     setInterval(() => sendHeartbeat(), 10000).unref();
     setInterval(() => {

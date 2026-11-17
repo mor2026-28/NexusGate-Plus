@@ -1853,7 +1853,9 @@ test('19. Long-Duration 30-Day (720-Hour) Continuous Operation Simulation: Memor
   // with rotating client IPs, ephemeral ports, quota resets, audit logging, and periodic memory cleanups
   const { cleanupSystemLogsAndMemory } = require('../lib/system');
   if (typeof global.gc === 'function') global.gc();
-  const startHeapMB = process.memoryUsage().heapUsed / (1024 * 1024);
+  await req('/SecPath16Chars99/api/system/cleanup', { method: 'POST' });
+    if (typeof global.gc === 'function') global.gc();
+    const startHeapMB = process.memoryUsage().heapUsed / (1024 * 1024);
 
   let dynamicConns = [];
   const mockLongClash = http.createServer((reqM, resM) => {
@@ -3988,5 +3990,120 @@ test('33. SubCenter Bulk Operations (enable/disable/renew30d/clear-access/delete
     const cRes = await req(`/SecPath16Chars99/api/audit/clear?type=${type}`, { method: 'DELETE' });
     assert.equal(cRes.status, 200);
     assert.equal(store.state[key].length, 0, `DELETE /api/audit/clear?type=${type} must clear ${key}`);
+  }
+});
+
+test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Master Domain Self-Healing (zz.vponlive.com), SS-2022 EIH Dual-Key Outbounds (Ksenia 56165) & Self-Hosted Agent Scripts', async () => {
+  const { compileNodeSingboxConfig, buildAgentInstallCommand } = require('../lib/cluster');
+  const { toSingboxOutbound } = require('../lib/protocols');
+  const { parse3xuiPayload } = require('../lib/migrate3xui');
+
+  // 1. Verify self-hosted Agent scripts are served on both raw path and webBasePath
+  for (const prefix of ['', '/SecPath16Chars99']) {
+    const shRes = await req(`${prefix}/api/cluster/install-agent.sh`);
+    assert.equal(shRes.status, 200);
+    assert.ok(shRes.text.includes('TAKEOVER_3XUI="1"'), 'install-agent.sh must default TAKEOVER_3XUI=1');
+    assert.ok(shRes.text.includes('/api/cluster/nexus-agent.js'), 'install-agent.sh must fetch nexus-agent.js from Master Panel');
+
+    const jsRes = await req(`${prefix}/api/cluster/nexus-agent.js`);
+    assert.equal(jsRes.status, 200);
+    assert.ok(jsRes.text.includes('v1.0.14'), 'nexus-agent.js must be v1.0.14');
+  }
+
+  // 2. Issue a valid Let's Encrypt-like CA cert for Master Panel (zz.vponlive.com) and bind it to Master Panel
+  const caDir = path.join(tmpDir, 'ca_v1014');
+  fs.mkdirSync(caDir, { recursive: true });
+  const caKey = path.join(caDir, 'ca.key');
+  const caCert = path.join(caDir, 'ca.crt');
+  spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+    '-days', '3650', '-nodes', '-subj', '/C=US/O=Let\'s Encrypt/CN=YE2',
+    '-keyout', caKey, '-out', caCert
+  ]);
+  const zzDir = path.join(tmpDir, 'certs', 'zz.vponlive.com');
+  fs.mkdirSync(zzDir, { recursive: true });
+  const zzKey = path.join(zzDir, 'privkey.pem');
+  const zzCsr = path.join(zzDir, 'req.csr');
+  const zzCert = path.join(zzDir, 'fullchain.pem');
+  spawnSync('openssl', ['req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-subj', '/CN=zz.vponlive.com', '-keyout', zzKey, '-out', zzCsr]);
+  spawnSync('openssl', ['x509', '-req', '-in', zzCsr, '-CA', caCert, '-CAkey', caKey, '-CAcreateserial', '-out', zzCert, '-days', '90']);
+
+  const bindZzRes = await req('/SecPath16Chars99/api/certificates/custom', {
+    method: 'POST',
+    body: JSON.stringify({ domain: 'zz.vponlive.com', certPath: zzCert, keyPath: zzKey, applyToPanel: true })
+  });
+  assert.equal(bindZzRes.status, 201);
+  assert.equal(store.state.settings.webDomain, 'zz.vponlive.com');
+
+  // 3. Create Remote Relay node "vm备用" (domain: vm.362353.xyz, host: 216.167.34.155)
+  const addVmRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'vm备用',
+      role: 'relay',
+      host: '216.167.34.155',
+      domain: 'vm.362353.xyz'
+    })
+  });
+  assert.equal(addVmRes.status, 201);
+  const vmNode = addVmRes.json.node;
+
+  // 4. Import real "dmit 120dao 3xui_backup.tar.gz" into vm备用 with mode=replace
+  const dmit120Path = '/working_dir/c_32e442420631bd5b/user_uploaded_files/ttl=63d/user_uploaded/dmit 120dao 3xui_backup.tar.gz';
+  if (fs.existsSync(dmit120Path)) {
+    const dmitBuf = fs.readFileSync(dmit120Path);
+    const migVmRes = await req(`/SecPath16Chars99/api/migrate/3xui?mode=replace&targetNodeId=${vmNode.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: dmitBuf
+    });
+    assert.equal(migVmRes.status, 200);
+    assert.equal(migVmRes.json.record.inboundsCount, 27, 'Must migrate all 27 inbounds of vm备用');
+
+    // Master Panel domain and local node domain MUST remain zz.vponlive.com (NEVER hijacked to vm.362353.xyz!)
+    assert.equal(store.state.settings.webDomain, 'zz.vponlive.com', 'Master webDomain must remain zz.vponlive.com after remote Relay migration');
+    assert.equal(store.state.settings.webCertFile, zzCert, 'Master webCertFile must remain zz.vponlive.com cert');
+    const localNodeAfter = store.state.nodes.find((n) => n.isLocal);
+    assert.equal(localNodeAfter.domain, 'zz.vponlive.com', 'Local Master node domain must remain zz.vponlive.com');
+
+    // Simulate a hijacked state (as occurred in v1.0.13) and verify GET /api/certificates (which triggers syncDiscoveredCerts) automatically self-heals back to zz.vponlive.com!
+    store.transact((st) => {
+      st.settings.webDomain = 'vm.362353.xyz';
+      const ln = st.nodes.find((n) => n.isLocal);
+      if (ln) ln.domain = 'vm.362353.xyz';
+    });
+    const certsHealRes = await req('/SecPath16Chars99/api/certificates');
+    assert.equal(certsHealRes.status, 200);
+    assert.equal(store.state.settings.webDomain, 'zz.vponlive.com', 'syncDiscoveredCerts must auto-heal hijacked Master webDomain back to zz.vponlive.com');
+    assert.equal(store.state.nodes.find((n) => n.isLocal).domain, 'zz.vponlive.com', 'syncDiscoveredCerts must auto-heal Local Master node domain back to zz.vponlive.com');
+
+    // Verify compiled Sing-box config for vm备用:
+    // - Inbound 56165 (US-Ksenia-01/04年) has WS (/rukky) + TLS (vm.362353.xyz) + embedded certPem/keyPem
+    // - Outbound Ksenia01/04-xbjn2m6k preserves method = "2022-blake3-aes-256-gcm" and dual-key EIH password!
+    // - Block rule for ping0.cc appears BEFORE inbound->outbound relay rules!
+    const vmCompiled = compileNodeSingboxConfig(store.state, vmNode.id);
+    const sb56165 = vmCompiled.singboxConfig.inbounds.find((i) => i.listen_port === 56165);
+    assert.ok(sb56165, 'Inbound 56165 must be compiled for vm备用');
+    assert.equal(sb56165.tls.server_name, 'vm.362353.xyz');
+    assert.equal(sb56165.transport.type, 'ws');
+    assert.equal(sb56165.transport.path, '/rukky');
+
+    const kseniaOut = vmCompiled.singboxConfig.outbounds.find((o) => o.tag.includes('Ksenia01/04-xbjn2m6k'));
+    assert.ok(kseniaOut, 'Outbound Ksenia01/04-xbjn2m6k must exist in vm备用 compiled config');
+    assert.equal(kseniaOut.method, '2022-blake3-aes-256-gcm', 'SS-2022 EIH dual-key outbound must preserve 2022-blake3-aes-256-gcm without downgrade');
+    assert.ok(kseniaOut.password.includes(':'), 'SS-2022 EIH dual-key password must preserve serverKey:userKey format');
+
+    const vmCertObj = vmCompiled.certificates.find((c) => c.domain === 'vm.362353.xyz');
+    assert.ok(vmCertObj && vmCertObj.certPem.includes('BEGIN CERTIFICATE') && vmCertObj.keyPem.includes('PRIVATE KEY'), 'vm备用 compiled bundle must include full PEM certificate and private key');
+
+    const pingRuleIdx = vmCompiled.singboxConfig.route.rules.findIndex((r) => r.outbound === 'block' && r.domain_suffix?.includes('ping0.cc'));
+    const relay56165Idx = vmCompiled.singboxConfig.route.rules.findIndex((r) => Array.isArray(r.inbound) && r.inbound.includes(sb56165.tag));
+    assert.ok(pingRuleIdx >= 0 && relay56165Idx > pingRuleIdx, 'Block rule (ping0.cc) must be evaluated BEFORE inbound->outbound relay rule in Sing-box config');
+
+    // Verify buildAgentInstallCommand uses zz.vponlive.com (never vm.362353.xyz), self-hosted /api/cluster/install-agent.sh, and --takeover-3xui
+    const agentCmd = buildAgentInstallCommand(store.state, vmNode, 'vm.362353.xyz:19541');
+    assert.ok(agentCmd.includes('zz.vponlive.com'), `Agent command must use Master domain zz.vponlive.com even if reqHost was hijacked, got: ${agentCmd}`);
+    assert.ok(agentCmd.includes('/api/cluster/install-agent.sh'), 'Agent command must use self-hosted /api/cluster/install-agent.sh');
+    assert.ok(agentCmd.includes('--takeover-3xui'), 'Agent command must include --takeover-3xui');
   }
 });
