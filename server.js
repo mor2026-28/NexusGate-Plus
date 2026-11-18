@@ -61,6 +61,7 @@ const {
   buildAgentInstallCommand
 } = require('./lib/cluster');
 const {
+  replacePrimaryClusterNode,
   triggerNodeFailover,
   triggerNodeFailback,
   updateCloudflareDnsIp,
@@ -83,7 +84,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.15';
+const VERSION = '1.0.16';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -1129,7 +1130,7 @@ function normalizeInboundPayload(body, existing = null) {
     } else if (!pub) {
       pub = deriveRealityPublicKey(priv);
     }
-    let serverName = String(rIn.serverName || 'tesla.com').trim();
+    let serverName = String(rIn.serverName || body.sni || body.tlsDomain || 'tesla.com').trim();
     if (['www.cloudflare.com', 'cloudflare.com', 'www.bing.com', 'bing.com', 'www.yahoo.com', 'yahoo.com', 'dl.google.com'].includes(serverName.toLowerCase())) {
       serverName = 'tesla.com';
     }
@@ -2718,18 +2719,25 @@ async function handleRequest(req, res) {
     // 11.5 Cluster Nodes (Relay / Exit / Standby) & Failover Orchestration Endpoints
     if (pathname === '/api/cluster/nodes' && method === 'GET') {
       ensureClusterNodes(store.state);
-      const nodesWithStats = (store.state.nodes || []).map((n) => {
+      const allNodes = store.state.nodes || [];
+      const uninstallCmd = "systemctl stop nexusgate-agent nexusgate-singbox 2>/dev/null || true; systemctl disable nexusgate-agent nexusgate-singbox 2>/dev/null || true; rm -rf /opt/nexusgate-agent /etc/nexusgate /etc/systemd/system/nexusgate-agent.service /etc/systemd/system/nexusgate-singbox.service && systemctl daemon-reload";
+      const nodesWithStats = allNodes.map((n) => {
         const nodeInbounds = (store.state.inbounds || []).filter((i) => (i.nodeId || 'node_local') === n.id);
         const nodeClients = nodeInbounds.reduce((acc, i) => acc + (i.clients?.length || 0), 0);
         const upTotal = nodeInbounds.reduce((acc, i) => acc + Number(i.up || 0), 0);
         const downTotal = nodeInbounds.reduce((acc, i) => acc + Number(i.down || 0), 0);
+        const boundPrimaryNames = allNodes.filter((x) => x.id !== n.id && x.standbyNodeId === n.id).map((x) => x.name);
+        const takingOverNames = allNodes.filter((x) => x.id !== n.id && x.activeFailoverTo === n.id).map((x) => x.name);
         return {
           ...n,
           inboundsCount: nodeInbounds.length,
           clientsCount: nodeClients,
           upTotal,
           downTotal,
-          installCommand: buildAgentInstallCommand(store.state, n, reqHostHeader)
+          boundPrimaryNames,
+          takingOverNames,
+          installCommand: buildAgentInstallCommand(store.state, n, reqHostHeader),
+          uninstallCommand: uninstallCmd
         };
       });
       return sendJson(res, 200, {
@@ -3000,6 +3008,29 @@ async function handleRequest(req, res) {
       const syncRes = await pushConfigToAgentNode(store.state, clusterNodeSync.id);
       store.save();
       return sendJson(res, 200, syncRes);
+    }
+
+    const clusterNodeReplacePrimary = route('/api/cluster/nodes/:id/replace-primary', pathname);
+    if (clusterNodeReplacePrimary && method === 'POST') {
+      const body = await readJson(req);
+      const result = await replacePrimaryClusterNode(store, clusterNodeReplacePrimary.id, body);
+      const primaryWithCmd = {
+        ...result.primaryNode,
+        installCommand: buildAgentInstallCommand(store.state, result.primaryNode, reqHostHeader)
+      };
+      store.transact(() => store.addAudit(
+        session.username,
+        'replace_primary_node',
+        result.mode === 'demote_to_standby'
+          ? `${result.primaryNode.name} (${result.primaryNode.host}) 接管 ${result.transferredInboundsCount} 节点，原机 [${result.standbyNode?.name}] 转为共享热备`
+          : `${result.primaryNode.name} 原地更换新主力 IP (${result.oldHost} ➔ ${result.primaryNode.host})`
+      ));
+      autoApplyIfEnabled();
+      return sendJson(res, 200, {
+        ...result,
+        primaryNode: primaryWithCmd,
+        installCommand: primaryWithCmd.installCommand
+      });
     }
 
     if (pathname === '/api/cluster/failover' && method === 'POST') {
@@ -3958,6 +3989,9 @@ function startPanelServer(callback) {
       }
     } catch (err) {
       console.warn('[NexusGate] 初始化写入 Sing-box 配置提示:', err.message);
+    }
+    if (process.env.NG_TEST_MODE !== '1') {
+      setImmediate(() => syncChangedClusterNodes(store.state).catch(() => {}));
     }
     if (callback) callback(server, proto);
   });

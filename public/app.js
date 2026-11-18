@@ -524,7 +524,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.15 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.16 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -592,7 +592,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.15</span>
+          <span class="tag">NexusGate Plus v1.0.16</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -800,11 +800,17 @@ function renderCluster() {
                     : (nodes.find((x) => x.id === n.fallbackExitNodeId)
                         ? `🛡 备落地: ${esc(nodes.find((x) => x.id === n.fallbackExitNodeId).name)} (${n.autoFailoverMinutes || 3}m自切)`
                         : '单机落地 (可绑备用落地)'))
-                : (activeFoObj
-                    ? `⚠ 已接管至 ${esc(activeFoObj.name)}`
-                    : (standbyObj
-                        ? `🛡 ${esc(standbyObj.name)} · ${n.autoFailover !== false ? `${n.autoFailoverMinutes || 3}m自切` : '手动'} (${n.standbySyncMode === 'daily' ? '每日备份' : (n.standbySyncMode === 'on_failover' ? '按需下发' : '变更同步·0流量')})`
-                        : '未绑定热备机'))
+                : (n.role === 'standby'
+                    ? (n.takingOverNames?.length
+                        ? `⚡ 正在顶替主力: ${esc(n.takingOverNames.join(' / '))}`
+                        : (n.boundPrimaryNames?.length
+                            ? `🛡 共享守护 ${n.boundPrimaryNames.length} 台主力: ${esc(n.boundPrimaryNames.join(' / '))} (1对多轮换·0冲突)`
+                            : '🛡 共享热备待命 (可同时绑定多台主力机 A/B/C)'))
+                    : (activeFoObj
+                        ? `⚠ 已接管至 ${esc(activeFoObj.name)}`
+                        : (standbyObj
+                            ? `🛡 ${esc(standbyObj.name)} · ${n.autoFailover !== false ? `${n.autoFailoverMinutes || 3}m自切` : '手动'} (${n.standbySyncMode === 'daily' ? '每日备份' : (n.standbySyncMode === 'on_failover' ? '按需下发·1对多共享' : '变更同步·0流量')})`
+                            : '未绑定热备机')))
             }</b>
           </div>
         </div>
@@ -821,6 +827,7 @@ function renderCluster() {
           <button data-action="preview-node-config" data-id="${esc(n.id)}">｛｝ 节点配置</button>
           ${!n.isLocal ? `<button data-copy="${esc(n.installCommand || '')}">📋 复制 Agent 命令</button>` : `<button data-action="Filter-node-inbounds" data-node="${esc(n.id)}">◫ 管理节点</button>`}
           ${(n.role === 'relay' || n.role === 'hybrid') && n.domain ? `<button data-action="test-node-cf" data-id="${esc(n.id)}" title="检测 Cloudflare API Token 是否能自动识别该域名与 Zone ID">🔍 测 CF 解析</button>` : ''}
+          ${!n.isLocal && (n.role === 'relay' || n.role === 'hybrid') ? `<button class="primary" data-action="open-replace-primary-modal" data-id="${esc(n.id)}" title="主力机恢复或新购主力机到位时，一键将当前顶替机的全部节点/规则/域名无缝移交新主力机，并将原机自动退居为共享热备机或原地替换 IP">🔄 主力接管 / 替换</button>` : ''}
           ${(n.role === 'relay' || n.role === 'hybrid') && !isFailedOver ? `<button class="warning" data-action="open-failover-modal" data-id="${esc(n.id)}">⚡ 一键容灾切换</button>` : ''}
           ${isFailedOver ? `<button class="success" data-action="trigger-failback" data-id="${esc(n.id)}">✓ 主力恢复回切</button>` : ''}
           <button data-action="edit-cluster-node" data-id="${esc(n.id)}">编辑</button>
@@ -875,7 +882,7 @@ function renderCluster() {
   const foRows = (state.failoverLogs || []).map((log) => `
     <tr>
       <td><strong>${fmtDateTime(log.at)}</strong></td>
-      <td><span class="tag ${log.action.includes('failover') ? 'relay' : 'tls'}">${log.action === 'master_takeover' ? '🛡️ 备用主控接管' : (log.action === 'exit_failover' ? '⚡ 落地容错切换' : (log.action === 'exit_failback' ? '✓ 落地恢复回切' : (log.action === 'failover' ? '⚡ 中转容灾接管' : '✓ 中转恢复回切')))}</span></td>
+      <td><span class="tag ${log.action.includes('failover') ? 'relay' : 'tls'}">${log.action === 'primary_takeover' ? '🔄 主力接管+退居热备' : (log.action === 'primary_replace_ip' ? '🔄 原地换新主力IP' : (log.action === 'master_takeover' ? '🛡️ 备用主控接管' : (log.action === 'exit_failover' ? '⚡ 落地容错切换' : (log.action === 'exit_failback' ? '✓ 落地恢复回切' : (log.action === 'failover' ? '⚡ 中转容灾接管' : '✓ 中转恢复回切')))))}</span></td>
       <td><b>${esc(log.primaryNodeName)}</b> ➔ <b>${esc(log.standbyNodeName || '主力本机')}</b></td>
       <td><code>${esc(log.domain)}</code>: <code>${esc(log.oldIp)}</code> ➔ <code>${esc(log.newIp)}</code></td>
       <td><small>${esc(log.dnsMessage || log.reason || '')}</small></td>
@@ -4564,6 +4571,111 @@ function openFailoverModal(primaryNode) {
   );
 }
 
+
+function openReplacePrimaryModal(targetNode) {
+  const suggestedPrimaryName = (targetNode.name || "").includes("备用")
+    ? targetNode.name.replace(/备用/g, "主力")
+    : `${targetNode.name}-主力`;
+  const suggestedStandbyName = (targetNode.name || "").includes("备用") || (targetNode.name || "").includes("热备")
+    ? targetNode.name
+    : `${targetNode.name}-共享热备`;
+  const existingStandbys = (state.nodes || []).filter((x) => x.id !== targetNode.id && !x.isLocal);
+  const standbyOpts = [
+    '<option value="">暂不额外绑定其他备用机</option>',
+    ...existingStandbys.map((x) => `<option value="${esc(x.id)}"${selected(x.id, targetNode.standbyNodeId)}>${esc(x.name)} (${esc(x.host)} · ${x.role === "standby" ? "共享热备机" : "集群节点"})</option>`)
+  ].join("");
+
+  openModal(
+    `🔄 主力机无缝接管 / 替换临时顶替机 (${targetNode.name})`,
+    `无需重导备份 · 无需删节点 · 一键移交 ${targetNode.inboundsCount || 0} 个入站节点与域名 ${targetNode.domain || targetNode.host}`,
+    `
+    <form id="replace-primary-form" class="form-grid" data-target-id="${esc(targetNode.id)}">
+      <div class="wide" style="padding:12px 14px;border-radius:10px;background:var(--primary-soft);color:var(--primary);font-size:12.5px;line-height:1.6">
+        <b>💡 适用场景说明（前期因主力机被墙/故障，直接拿备用机导入了备份顶替使用，现在新主力机到位如何接管？）</b>：<br>
+        • <b>方案 A（原机退居共享热备机 · 强烈推荐）</b>：一键创建新主力机并自动接管当前机器上的 <b>${targetNode.inboundsCount || 0} 个入站节点、转发规则与专属域名 <code>${esc(targetNode.domain || targetNode.host)}</code></b>（自动将 Cloudflare DNS 解析切至新主力机 IP）；同时将当前这台顶替机 <b>[${esc(targetNode.name)} (${esc(targetNode.host)})]</b> 自动转换为<b>「热备容灾机 (Standby)」</b>并释放业务端口——<b>无需删除原机、无需在原机 SSH 执行卸载命令</b>，且这 1 台热备机可同时给集群内 A、B、C 多台主力机共享轮流顶替（按需下发 · 0 端口冲突）！<br>
+        • <b>方案 B（原地直接更换为新主力机 IP · 淘汰旧机）</b>：如果您已有其他共享热备机、准备把当前这台临时机退租或只留作他用，直接将该节点的 IP 与名称原地更新为新主力机即可。
+      </div>
+
+      <label class="wide">
+        接管 / 替换方案选择
+        <select name="mode" id="replace-primary-mode-select">
+          <option value="demote_to_standby" selected>🛡️ 方案 A：新主力机接管全部节点与域名 + 原顶替机自动退居为「1对多共享热备机」(免删机/免卸载 · 推荐)</option>
+          <option value="replace_in_place">🔄 方案 B：原地直接将此节点更换为新主力机 IP 与名称 (保留全部节点与域名，旧机直接淘汰/退租)</option>
+        </select>
+      </label>
+
+      <label>
+        新主力机名称
+        <input name="newPrimaryName" value="${esc(suggestedPrimaryName)}" placeholder="例如: vm主力 / HK-CMI主力" required>
+      </label>
+
+      <label>
+        新主力机公网 IP (IPv4 / IPv6)
+        <input name="newPrimaryHost" placeholder="输入新到位的主力机公网 IP" required>
+      </label>
+
+      <label>
+        新主力机 Agent 通信端口
+        <input type="number" name="newPrimaryAgentPort" value="${targetNode.agentPort || 19090}" min="1" max="65535" required>
+      </label>
+
+      <label>
+        专属入口域名 (自动移交新主力机)
+        <input name="domain" value="${esc(targetNode.domain || "")}" placeholder="例如: vm.362353.xyz">
+      </label>
+
+      <div id="demote-standby-options" class="wide form-grid" style="margin:0;padding:12px;border-radius:10px;border:1px solid var(--border);background:var(--surface-2)">
+        <label>
+          原机退居热备后的名称
+          <input name="standbyName" value="${esc(suggestedStandbyName)}" placeholder="例如: vm备用-共享热备">
+        </label>
+        <label>
+          热备机同步模式 (1台备用机守护多台主力推荐「按需下发」)
+          <select name="standbySyncMode">
+            <option value="on_failover" selected>⚡ 故障容灾时按需下发 (1台热备机轮换顶替 A/B/C 多台主力 · 平时0端口占用·0冲突)</option>
+            <option value="on_change">🔁 1对1 实时镜像预热 (仅绑定单台主力机时使用)</option>
+          </select>
+        </label>
+        <label class="wide" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="checkbox" name="shareStandbyWithAllRelays" checked style="width:auto">
+          <span><b>一机多备共享守护</b>：同时将该退居的热备机自动绑定为集群内其他主力中转机的共享热备机（A 故障顶 A ➔ A 恢复切回 A ➔ B 故障顶 B，全程零冲突！）</span>
+        </label>
+      </div>
+
+      <div id="replace-inplace-options" class="wide form-grid" style="display:none;margin:0;padding:12px;border-radius:10px;border:1px solid var(--border);background:var(--surface-2)">
+        <label class="wide">
+          为新主力机关联共享热备容灾机 (可选，可多台主力机共用同一台热备机)
+          <select name="standbyNodeId">
+            ${standbyOpts}
+          </select>
+        </label>
+      </div>
+
+      <label class="wide" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+        <input type="checkbox" name="switchCfDns" checked style="width:auto">
+        <span><b>自动切换 Cloudflare DNS 解析</b>：立即将 <code>${esc(targetNode.domain || "专属域名")}</code> 的 A/AAAA 记录指向新主力机 IP (TTL 60s)</span>
+      </label>
+
+      <div class="form-actions">
+        <button type="button" data-close>取消</button>
+        <button type="submit" class="primary">🚀 立即执行主力接管与配置迁移</button>
+      </div>
+    </form>
+    `
+  );
+
+  const modeSel = document.getElementById("replace-primary-mode-select");
+  const demoteBox = document.getElementById("demote-standby-options");
+  const inplaceBox = document.getElementById("replace-inplace-options");
+  if (modeSel) {
+    modeSel.addEventListener("change", () => {
+      const isDemote = modeSel.value === "demote_to_standby";
+      if (demoteBox) demoteBox.style.display = isDemote ? "" : "none";
+      if (inplaceBox) inplaceBox.style.display = isDemote ? "none" : "";
+    });
+  }
+}
+
 function openRuleModal(existing = null) {
   const defaultOut = state.outbounds.find((o) => !o.builtin)?.tag || 'direct';
   const r = existing ? {
@@ -4970,6 +5082,10 @@ document.addEventListener('click', async (e) => {
           <div style="display:flex;justify-content:flex-end"><button class="primary" data-copy="${esc(jsonStr)}">复制该服务器专属 config.json</button></div>
         </div>
       `);
+    }
+    else if (action === 'open-replace-primary-modal') {
+      const node = (state.nodes || []).find((x) => x.id === actEl.dataset.id);
+      if (node) openReplacePrimaryModal(node);
     }
     else if (action === 'open-failover-modal') {
       const node = (state.nodes || []).find((x) => x.id === actEl.dataset.id);
@@ -5986,7 +6102,64 @@ document.addEventListener('submit', async (e) => {
         load('cluster', { silent: true });
       }
     }
-    else if (form.id === 'failover-form') {
+    else if (form.id === 'replace-primary-form') {
+      const targetId = form.dataset.targetId;
+      const mode = data.mode || 'demote_to_standby';
+      const payload = {
+        mode,
+        newPrimaryName: data.newPrimaryName,
+        newPrimaryHost: data.newPrimaryHost,
+        newPrimaryAgentPort: Number(data.newPrimaryAgentPort || 19090),
+        domain: data.domain,
+        standbyName: data.standbyName,
+        standbySyncMode: data.standbySyncMode || 'on_failover',
+        standbyNodeId: data.standbyNodeId || '',
+        shareStandbyWithAllRelays: form.querySelector('[name="shareStandbyWithAllRelays"]')?.checked !== false,
+        switchCfDns: form.querySelector('[name="switchCfDns"]')?.checked !== false
+      };
+      const res = await api(`/api/cluster/nodes/${encodeURIComponent(targetId)}/replace-primary`, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      closeModal();
+      toast(`✅ 主力机无缝接管完成！已移交 ${res.transferredInboundsCount || 0} 个入站节点`);
+      await load('cluster');
+      openModal(
+        `✅ 主力机 [${res.primaryNode?.name}] 已接管 ${res.transferredInboundsCount || 0} 个节点`,
+        res.mode === 'demote_to_standby'
+          ? `原机 [${res.standbyNode?.name} (${res.oldHost})] 已自动转为共享热备容灾机（无需删除或 SSH 卸载）`
+          : `节点 IP 已从 ${res.oldHost} 更换为新主力机 ${res.primaryNode?.host}`,
+        `
+        <div class="stack" style="gap:12px">
+          <div style="padding:12px;border-radius:10px;background:var(--success-soft);color:var(--success);font-size:13px;line-height:1.6">
+            <b>1. 节点与域名移交结果</b>：${esc(res.event?.dnsMessage || "已完成移交")}<br>
+            <b>2. 下一步操作</b>：请在新到位的主力机 (<code>${esc(res.primaryNode?.host)}</code>) SSH 终端执行下方 <b>1 行受控端 Agent 安装命令</b>，执行后新主力机将立即自动拉取全部 ${res.transferredInboundsCount || 0} 个入站节点、转发规则与 SSL 证书！
+          </div>
+          <div>
+            <b style="font-size:13px;display:block;margin-bottom:6px">📋 新主力机 (${esc(res.primaryNode?.host)}) 一键安装 Agent 命令：</b>
+            <div class="codebox" style="word-break:break-all">${esc(res.installCommand || "")}</div>
+            <div style="display:flex;justify-content:flex-end;margin-top:6px">
+              <button type="button" class="primary" data-copy="${esc(res.installCommand || "")}">📋 一键复制新主力机安装命令</button>
+            </div>
+          </div>
+          ${res.mode === 'replace_in_place' ? `
+          <div style="border-top:1px solid var(--border);padding-top:10px">
+            <b style="font-size:12.5px;color:var(--muted);display:block;margin-bottom:6px">🗑 旧临时机 (${esc(res.oldHost)}) 停用卸载 Agent 命令（如旧机器直接到期退租或重装系统则无需执行）：</b>
+            <div class="codebox" style="word-break:break-all;font-size:11.5px">${esc(res.uninstallOldAgentCommand || "")}</div>
+            <div style="display:flex;justify-content:flex-end;margin-top:6px">
+              <button type="button" data-copy="${esc(res.uninstallOldAgentCommand || "")}">复制旧机卸载清理命令</button>
+            </div>
+          </div>
+          ` : `
+          <div style="padding:10px 12px;border-radius:9px;background:var(--surface-2);font-size:12.5px;line-height:1.55">
+            🛡️ <b>关于原顶替机 [${esc(res.standbyNode?.name)} (${esc(res.oldHost)})]</b>：主控已自动向其下发空闲热备待命配置并释放原有业务端口，<b>您无需在面板删除它，也无需去 SSH 执行任何删除/卸载命令</b>！它现在作为集群共享热备机（守护：${esc((res.sharedRelayNames || []).join(" / "))}），后续任意一台主力机 A 或 B 故障时都可由它轮流顶替。
+          </div>
+          `}
+        </div>
+        `
+      );
+    }
+        else if (form.id === 'failover-form') {
       const primaryNodeId = form.dataset.primaryId;
       const res = await api('/api/cluster/failover', {
         method: 'POST',
@@ -6218,7 +6391,7 @@ $('#sidebar-scrim')?.addEventListener('click', () => $('#app').classList.remove(
       !isEditingField &&
       !recentlyScrolled &&
       !hasOpenInlineQr &&
-      ['overview', 'inbounds', 'outbounds'].includes(state.page)
+      ['overview', 'cluster', 'inbounds', 'outbounds', 'subcenter'].includes(state.page)
     ) {
       load(state.page, { silent: true });
     }

@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.15)
+ * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.16)
  * Zero external npm dependencies · < 15 MB RAM footprint
  * Supports Relay Node, Exit Node (SS/SS2022/VMess), and Hot-Standby Failover Node.
  * Features:
@@ -27,7 +27,7 @@ const https = require('node:https');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 
-const AGENT_VERSION = '1.0.15';
+const AGENT_VERSION = '1.0.16';
 const ACTIVE_LEASE_TTL_MS = 60000;
 const EXCESS_IP_BLOCK_TTL_MS = 60000;
 
@@ -286,42 +286,105 @@ function ensureLocalSingboxRunning(customCfg = cfg) {
   return false;
 }
 
+function decodeProcNetIp(hexAddr) {
+  if (!hexAddr) return "";
+  const clean = String(hexAddr).trim().toUpperCase();
+  if (clean.length === 8) {
+    const b0 = parseInt(clean.slice(6, 8), 16);
+    const b1 = parseInt(clean.slice(4, 6), 16);
+    const b2 = parseInt(clean.slice(2, 4), 16);
+    const b3 = parseInt(clean.slice(0, 2), 16);
+    if ([b0, b1, b2, b3].some((x) => Number.isNaN(x))) return "";
+    return normalizeClientIp(`${b0}.${b1}.${b2}.${b3}`);
+  }
+  if (clean.length === 32) {
+    // IPv4-mapped IPv6 in /proc/net/tcp6: 0000000000000000FFFF0000XXXXXXXX
+    if (clean.startsWith("0000000000000000FFFF0000")) {
+      return decodeProcNetIp(clean.slice(24, 32));
+    }
+    // Native IPv6 (4x 32-bit little-endian words)
+    const words = [];
+    for (let w = 0; w < 32; w += 8) {
+      const word = clean.slice(w, w + 8);
+      const rev = word.slice(6, 8) + word.slice(4, 6) + word.slice(2, 4) + word.slice(0, 2);
+      words.push(rev.slice(0, 4).replace(/^0+/, "") || "0");
+      words.push(rev.slice(4, 8).replace(/^0+/, "") || "0");
+    }
+    return normalizeClientIp(words.join(":"));
+  }
+  return "";
+}
+
 function scanKernelEstablishedSockets() {
   if (process.env.NG_TEST_MODE || inboundByPort.size === 0) {
     return { portPeers: new Map(), peerToLocalPort: new Map() };
   }
   const now = Date.now();
-  if (now - lastKernelScanAt < 2000 && cachedKernelPortPeers.size > 0) {
+  if (now - lastKernelScanAt < 1500 && cachedKernelPortPeers.size > 0) {
     return { portPeers: cachedKernelPortPeers, peerToLocalPort: cachedPeerToLocalPort };
   }
   lastKernelScanAt = now;
   const portPeers = new Map();
   const peerToLocalPort = new Map();
+
+  const recordPeer = (localPort, peerIp, peerPort) => {
+    if (!localPort || !peerIp || !inboundByPort.has(localPort)) return;
+    if (!portPeers.has(localPort)) portPeers.set(localPort, new Set());
+    portPeers.get(localPort).add(peerIp);
+    if (peerPort > 0) peerToLocalPort.set(`${peerIp}:${peerPort}`, localPort);
+    if (!peerToLocalPort.has(peerIp)) peerToLocalPort.set(peerIp, localPort);
+  };
+
+  // 1. Direct Linux kernel /proc/net/tcp & /proc/net/tcp6 reader (< 0.2ms, zero external dependency)
+  for (const procFile of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    try {
+      if (!fs.existsSync(procFile)) continue;
+      const content = fs.readFileSync(procFile, "utf8");
+      const lines = content.split("\n");
+      for (let i = 1; i < lines.length; i += 1) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const parts = line.split(/\s+/);
+        if (parts.length < 4) continue;
+        const stateHex = parts[3];
+        // 01 = TCP_ESTABLISHED
+        if (stateHex !== "01") continue;
+        const [lAddrHex, lPortHex] = (parts[1] || "").split(":");
+        const [rAddrHex, rPortHex] = (parts[2] || "").split(":");
+        const localPort = parseInt(lPortHex, 16);
+        if (!localPort || !inboundByPort.has(localPort)) continue;
+        const peerIp = decodeProcNetIp(rAddrHex);
+        const peerPort = parseInt(rPortHex, 16) || 0;
+        if (peerIp) recordPeer(localPort, peerIp, peerPort);
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 2. Supplement with ss -tnH state established if available
   try {
-    const res = spawnSync('ss', ['-tnH', 'state', 'established'], { encoding: 'utf8', timeout: 1000 });
+    const res = spawnSync("ss", ["-tnH", "state", "established"], { encoding: "utf8", timeout: 1000 });
     if (res.status === 0 && res.stdout) {
-      for (const line of res.stdout.split('\n')) {
+      for (const line of res.stdout.split("\n")) {
         const trimmed = line.trim();
         if (!trimmed) continue;
         const parts = trimmed.split(/\s+/);
         if (parts.length < 4) continue;
-        const localAddr = parts[2] || '';
-        const peerAddr = parts[3] || '';
-        const lColon = localAddr.lastIndexOf(':');
-        const pColon = peerAddr.lastIndexOf(':');
+        const addrIdx = parts[0] === "ESTAB" ? 3 : 2;
+        const localAddr = parts[addrIdx] || "";
+        const peerAddr = parts[addrIdx + 1] || "";
+        const lColon = localAddr.lastIndexOf(":");
+        const pColon = peerAddr.lastIndexOf(":");
         if (lColon <= 0 || pColon <= 0) continue;
         const localPort = Number(localAddr.slice(lColon + 1));
         if (!inboundByPort.has(localPort)) continue;
-        const peerIp = normalizeClientIp(peerAddr.slice(0, pColon));
+        const rawHost = peerAddr.slice(0, pColon).replace(/%[^:\]]+/g, "");
+        const peerIp = normalizeClientIp(rawHost);
         const peerPort = Number(peerAddr.slice(pColon + 1) || 0);
-        if (!peerIp) continue;
-        if (!portPeers.has(localPort)) portPeers.set(localPort, new Set());
-        portPeers.get(localPort).add(peerIp);
-        if (peerPort > 0) peerToLocalPort.set(`${peerIp}:${peerPort}`, localPort);
-        if (!peerToLocalPort.has(peerIp)) peerToLocalPort.set(peerIp, localPort);
+        if (peerIp) recordPeer(localPort, peerIp, peerPort);
       }
     }
   } catch { /* ignore */ }
+
   cachedKernelPortPeers = portPeers;
   cachedPeerToLocalPort = peerToLocalPort;
   return { portPeers, peerToLocalPort };
@@ -440,6 +503,11 @@ function resolveInboundTagAndPolicy(conn, peerToLocalPort) {
       candidates.push(typeStr.slice(slashIdx + 1).trim());
     }
     candidates.push(typeStr);
+  }
+  if (Array.isArray(conn?.chains)) {
+    for (const cTag of conn.chains) {
+      if (cTag) candidates.push(String(cTag).trim());
+    }
   }
   if (conn?.rule) {
     const m = String(conn.rule).match(/inbound=\[?([^\],=\s]+)\]?/i);
@@ -643,6 +711,9 @@ function pollLocalClashTraffic(customCfg = cfg) {
       let raw = '';
       res.on('data', (c) => { raw += c; });
       res.on('end', () => {
+        if (res.statusCode === 401) {
+          rebuildInboundPolicyIndex(null, null, customCfg);
+        }
         try {
           const data = JSON.parse(raw || '{}');
           const conns = Array.isArray(data.connections) ? data.connections : [];

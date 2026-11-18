@@ -169,7 +169,7 @@ download_panel_source() {
   fi
 
   local latest_root_zip=""
-  latest_root_zip="$(ls -1t /root/NexusGate-Plus*.zip 2>/dev/null | head -n 1 || true)"
+  latest_root_zip="$(ls -1 /root/NexusGate-Plus*.zip 2>/dev/null | sort -V | tail -n 1 || true)"
 
   mkdir -p "$INSTALL_DIR"
   if [[ -n "$local_src" ]]; then
@@ -185,6 +185,8 @@ download_panel_source() {
   elif [[ -n "$latest_root_zip" && -f "$latest_root_zip" ]] && command -v unzip >/dev/null 2>&1; then
     info "检测到 /root 下存在本地安装包 (${latest_root_zip})，正在直接解压安装..."
     unzip -oq "$latest_root_zip" -d "$INSTALL_DIR"
+    mkdir -p /root/.ng-applied-zips
+    mv -f /root/NexusGate-Plus*.zip /root/.ng-applied-zips/ 2>/dev/null || true
   else
     info "正在从 GitHub (${REPO}@${BRANCH}) 下载最新面板源码..."
     curl -fL --retry 3 "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" -o "$tmp/source.tar.gz"
@@ -283,7 +285,7 @@ EOF
 
     if [[ -r /dev/tty && "${NG_NONINTERACTIVE:-0}" != "1" ]]; then
       echo ""
-      echo -e "${cyan}=== NexusGate Plus · 枢门集群 v1.0.15 已生成本机专属高强度随机登录凭据 ===${plain}"
+      echo -e "${cyan}=== NexusGate Plus · 枢门集群 v1.0.16 已生成本机专属高强度随机登录凭据 ===${plain}"
       echo -e "  • 随机面板端口 : ${yellow}${default_port}${plain}"
       echo -e "  • 随机管理账号 : ${green}${default_user}${plain}"
       echo -e "  • 随机高强密码 : ${green}${default_pass}${plain} (18位大小写字母+数字高强度混合)"
@@ -364,7 +366,7 @@ EOF
 
   echo ""
   echo -e "${green}==================================================================${plain}"
-  echo -e "${green} 🎉 NexusGate Plus · 枢门集群 v1.0.15 安装成功！${plain}"
+  echo -e "${green} 🎉 NexusGate Plus · 枢门集群 v1.0.16 安装成功！${plain}"
   echo -e "${green}==================================================================${plain}"
   echo -e " 访问地址   : ${cyan}${login_url}${plain}"
   echo -e " 登录账号   : ${green}${admin_user}${plain}"

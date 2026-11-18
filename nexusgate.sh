@@ -587,18 +587,64 @@ migrate_3xui() {
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
 }
 
+version_gt() {
+  local v1="${1#v}" v2="${2#v}"
+  [[ -z "$v1" ]] && return 1
+  [[ -z "$v2" ]] && return 0
+  [[ "$v1" == "$v2" ]] && return 1
+  local highest
+  highest="$(printf "%s\n%s\n" "$v1" "$v2" | sort -V | tail -n 1)"
+  [[ "$highest" == "$v1" ]]
+}
+
+version_ge() {
+  local v1="${1#v}" v2="${2#v}"
+  [[ -z "$v2" ]] && return 0
+  [[ -z "$v1" ]] && return 1
+  [[ "$v1" == "$v2" ]] && return 0
+  version_gt "$v1" "$v2"
+}
+
+extract_zip_version() {
+  local zf="$1"
+  local v=""
+  if command -v unzip >/dev/null 2>&1; then
+    v="$(unzip -p "$zf" package.json 2>/dev/null | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n 1 | sed -E 's/.*"([^"]+)"/\1/' || true)"
+  fi
+  if [[ -z "$v" ]]; then
+    v="$(basename "$zf" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+  fi
+  printf "%s" "$v"
+}
+
 update_panel() {
   need_root
   local tmp
   tmp="$(mktemp -d /tmp/ng-update.XXXXXX)"
-  local latest_zip=""
-  latest_zip="$(ls -1t /root/NexusGate-Plus*.zip 2>/dev/null | head -n 1 || true)"
+  local cur_ver="" remote_ver="" latest_zip="" zip_ver="" use_local_zip="0"
+  if [[ -f "$INSTALL_DIR/package.json" ]]; then
+    cur_ver="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$INSTALL_DIR/package.json" 2>/dev/null | head -n 1 | sed -E 's/.*"([^"]+)"/\1/' || true)"
+  fi
+  remote_ver="$(curl -fsSL --max-time 4 "https://raw.githubusercontent.com/${REPO}/${BRANCH}/package.json" 2>/dev/null | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n 1 | sed -E 's/.*"([^"]+)"/\1/' || true)"
+  latest_zip="$(ls -1 /root/NexusGate-Plus*.zip 2>/dev/null | sort -V | tail -n 1 || true)"
+  if [[ -n "$latest_zip" && -f "$latest_zip" ]] && command -v unzip >/dev/null 2>&1; then
+    zip_ver="$(extract_zip_version "$latest_zip")"
+    if version_gt "$zip_ver" "$cur_ver" && version_ge "$zip_ver" "$remote_ver"; then
+      use_local_zip="1"
+    else
+      mkdir -p /root/.ng-applied-zips
+      mv -f /root/NexusGate-Plus*.zip /root/.ng-applied-zips/ 2>/dev/null || true
+      info "已自动归档 /root 下的旧版本更新包 (v${zip_ver:-旧版})，准备从 GitHub 拉取最新版本 (v${remote_ver:-latest})..."
+    fi
+  fi
   systemctl stop nexusgate.service nexusgate-singbox.service 2>/dev/null || true
   pkill -9 -f "sing-box run" 2>/dev/null || true
   mkdir -p "$INSTALL_DIR"
-  if [[ -n "$latest_zip" && -f "$latest_zip" ]] && command -v unzip >/dev/null 2>&1; then
-    info "检测到 /root 下存在本地更新包 (${latest_zip})，正在直接解压更新..."
+  if [[ "$use_local_zip" == "1" ]]; then
+    info "检测到 /root 下存在更高版本本地更新包 (${latest_zip} · v${zip_ver})，正在直接解压更新..."
     unzip -oq "$latest_zip" -d "$INSTALL_DIR"
+    mkdir -p /root/.ng-applied-zips
+    mv -f /root/NexusGate-Plus*.zip /root/.ng-applied-zips/ 2>/dev/null || true
   else
     info "正在从 GitHub (${REPO}@${BRANCH}) 更新 NexusGate 面板与脚本..."
     curl -fL --retry 3 "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" -o "$tmp/src.tar.gz"
@@ -631,7 +677,7 @@ EOF
   NG_DATA_FILE="$DATA_FILE" node "$INSTALL_DIR/server.js" --open-firewall >/dev/null 2>&1 || true
   systemctl start nexusgate.service 2>/dev/null || true
   systemctl restart nexusgate-singbox.service 2>/dev/null || true
-  ok "NexusGate Plus 面板与管理脚本已更新至 v1.0.15，所有节点与 Sing-box 内核已重新加载生效！"
+  ok "NexusGate Plus 面板与管理脚本已更新至 v1.0.16，所有节点与 Sing-box 内核已重新加载生效！"
   show_info
   if [[ -r /dev/tty ]]; then
     pause_return
@@ -731,7 +777,7 @@ uninstall_panel() {
 show_menu() {
   echo -e "
   ${cyan}╔════════════════════════════════════════════════════════════════╗${plain}
-  ${cyan}║${plain}     ${green}         NexusGate Plus · 枢门集群 面板管理脚本 (v1.0.15)         ${plain}      ${cyan}║${plain}
+  ${cyan}║${plain}     ${green}         NexusGate Plus · 枢门集群 面板管理脚本 (v1.0.16)         ${plain}      ${cyan}║${plain}
   ${cyan}║${plain}     ${yellow}全协议节点编排 · BBR+FQ+HY2 加速 · ACME 证书联动${plain}          ${cyan}║${plain}
   ${cyan}╚════════════════════════════════════════════════════════════════╝${plain}
   ${green}0.${plain} 退出脚本
