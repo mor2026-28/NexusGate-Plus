@@ -83,7 +83,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.14';
+const VERSION = '1.0.15';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -1423,12 +1423,23 @@ function enrichInboundWithLinks(inbound, reqHost = '') {
   }
   const enrichedClients = (inbound.clients || []).map((c) => {
     const cKey = c.email || c.name || c.username || 'default';
-    const cIps = singbox.getActiveIpsForClient(inbound.tag, cKey, isSingleClient);
-    const cDevCount = singbox.getActiveDeviceCountForClient(inbound.tag, cKey, isSingleClient);
+    const localCIps = singbox.getActiveIpsForClient(inbound.tag, cKey, isSingleClient);
+    const remoteClientObj = inbound.remoteClientOnline && inbound.remoteClientOnline[cKey];
+    const remoteCIps = Array.isArray(remoteClientObj?.ips)
+      ? remoteClientObj.ips
+      : (isSingleClient ? remoteIps : []);
+    const cIps = [...new Set([...localCIps, ...remoteCIps])];
+    const cDevCount = Math.max(
+      singbox.getActiveDeviceCountForClient(inbound.tag, cKey, isSingleClient),
+      Number(remoteClientObj?.devices || (isSingleClient ? inbound.remoteActiveDevices : 0) || 0),
+      cIps.length
+    );
     if (cDevCount > 0) {
       c.lastOnline = nowMs;
     }
-    const cLastOnline = Number(c.lastOnline || (isSingleClient ? inbound.lastOnline : 0) || 0);
+    const cLastOnline = isSingleClient
+      ? Math.max(Number(c.lastOnline || 0), Number(inbound.lastOnline || 0))
+      : Number(c.lastOnline || 0);
     const cCreatedAt = Number(c.createdAt || Date.parse(inbound.createdAt || '') || nowMs);
     const cUpdatedAt = Number(c.updatedAt || Date.parse(inbound.updatedAt || '') || cCreatedAt);
     return {

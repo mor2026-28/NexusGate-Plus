@@ -4007,7 +4007,7 @@ test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Mas
 
     const jsRes = await req(`${prefix}/api/cluster/nexus-agent.js`);
     assert.equal(jsRes.status, 200);
-    assert.ok(jsRes.text.includes('v1.0.14'), 'nexus-agent.js must be v1.0.14');
+    assert.ok(jsRes.text.includes('1.0.15'), 'nexus-agent.js must be v1.0.15');
   }
 
   // 2. Issue a valid Let's Encrypt-like CA cert for Master Panel (zz.vponlive.com) and bind it to Master Panel
@@ -4105,5 +4105,200 @@ test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Mas
     assert.ok(agentCmd.includes('zz.vponlive.com'), `Agent command must use Master domain zz.vponlive.com even if reqHost was hijacked, got: ${agentCmd}`);
     assert.ok(agentCmd.includes('/api/cluster/install-agent.sh'), 'Agent command must use self-hosted /api/cluster/install-agent.sh');
     assert.ok(agentCmd.includes('--takeover-3xui'), 'Agent command must include --takeover-3xui');
+  }
+});
+
+test('35. v1.0.15 Remote Relay (vm备用 + evoxt备用 + isvoro HK备用) Real-Time Online Devices/IPs, 60s Rolling Session Lease, LastOnline & Traffic Sync, and Remote Agent limitIp/limitDevice Enforcement', async () => {
+  const {
+    activeSessionLeases,
+    applySyncedPayload,
+    pollLocalClashTraffic,
+    sendHeartbeat
+  } = require('../agent/nexus-agent');
+  const { compileNodeSingboxConfig } = require('../lib/cluster');
+
+  // 1. Add remote Relay node "isvoro HK备用" (hk.8668168.xyz) and migrate real "isvoro hk 3xui_backup.tar.gz"
+  const addIsvRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'isvoro HK备用',
+      role: 'relay',
+      host: '127.0.0.1',
+      domain: 'hk.8668168.xyz'
+    })
+  });
+  assert.equal(addIsvRes.status, 201);
+  const isvNode = addIsvRes.json.node;
+
+  const isvPath = '/working_dir/c_32e442420631bd5b/user_uploaded_files/ttl=63d/user_uploaded/isvoro hk 3xui_backup.tar.gz';
+  assert.ok(fs.existsSync(isvPath), 'isvoro hk 3xui_backup.tar.gz must exist');
+  const isvBuf = fs.readFileSync(isvPath);
+  const migIsvRes = await req(`/SecPath16Chars99/api/migrate/3xui?mode=merge&targetNodeId=${isvNode.id}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: isvBuf
+  });
+  assert.equal(migIsvRes.status, 200);
+  assert.equal(migIsvRes.json.record.inboundsCount, 10, 'isvoro HK备用 must migrate all 10 inbounds');
+
+  const hkInbBefore = store.state.inbounds.find((i) => i.nodeId === isvNode.id && i.port === 35405);
+  assert.ok(hkInbBefore, 'HK-Isvoro (:35405) must exist on isvoro HK备用');
+  const prevUp = Number(hkInbBefore.up || 0);
+  const prevDown = Number(hkInbBefore.down || 0);
+  const prevClientUp = Number(hkInbBefore.clients[0].up || 0);
+  const prevClientDown = Number(hkInbBefore.clients[0].down || 0);
+
+  // Configure limitIp = 2, limitDevice = 2 on HK-Isvoro (:35405)
+  const updLimRes = await req(`/SecPath16Chars99/api/inbounds/${hkInbBefore.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      ...hkInbBefore,
+      limitIp: 2,
+      limitDevice: 2
+    })
+  });
+  assert.equal(updLimRes.status, 200);
+
+  // 2. Compile config & inboundPolicies for isvoro HK备用 and sync to Agent
+  const compiled = compileNodeSingboxConfig(store.state, isvNode.id);
+  assert.ok(Array.isArray(compiled.inboundPolicies) && compiled.inboundPolicies.length === 9, 'compileNodeSingboxConfig must include inboundPolicies for all 9 enabled inbounds of isvoro HK备用');
+  const policy35405 = compiled.inboundPolicies.find((p) => p.port === 35405);
+  assert.equal(policy35405.limitIp, 2);
+  assert.equal(policy35405.limitDevice, 2);
+
+  // Also verify default-routed inbound-35405 has an explicit route rule in Sing-box config so Clash API always tags conn.rule!
+  assert.ok(
+    compiled.singboxConfig.route.rules.some((r) => Array.isArray(r.inbound) && r.inbound.includes(hkInbBefore.tag)),
+    'Default-routed inbound-35405 must have explicit inbound->finalOutbound rule in Sing-box config'
+  );
+
+  const tempAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ng-agent-v1015-'));
+  const agentConfigPath = path.join(tempAgentDir, 'config.json');
+  const agentStatePath = path.join(tempAgentDir, 'state.json');
+  activeSessionLeases.clear();
+
+  // Mock Clash API on the remote Relay server
+  const closedRemoteConnIds = [];
+  let mockRemoteConns = [
+    {
+      id: 'conn-v2rayn-dev1',
+      start: new Date().toISOString(),
+      metadata: {
+        network: 'tcp',
+        type: `vless/${hkInbBefore.tag}`,
+        sourceIP: '120.82.201.160',
+        sourcePort: '51234',
+        user: hkInbBefore.clients[0].email
+      },
+      upload: 524288,
+      download: 2097152,
+      chains: ['direct'],
+      rule: `inbound=[${hkInbBefore.tag}] => direct`
+    },
+    {
+      id: 'conn-v2rayn-dev2',
+      start: new Date().toISOString(),
+      metadata: {
+        network: 'tcp',
+        type: `vless/${hkInbBefore.tag}`,
+        sourceIP: '120.82.201.161',
+        sourcePort: '51235',
+        user: hkInbBefore.clients[0].email
+      },
+      upload: 262144,
+      download: 1048576,
+      chains: ['direct'],
+      rule: `inbound=[${hkInbBefore.tag}] => direct`
+    },
+    {
+      // 3rd device exceeding limitIp=2 / limitDevice=2 -> must be terminated by Agent!
+      id: 'conn-v2rayn-dev3-excess',
+      start: new Date().toISOString(),
+      metadata: {
+        network: 'tcp',
+        type: `vless/${hkInbBefore.tag}`,
+        sourceIP: '120.82.201.162',
+        sourcePort: '51236',
+        user: hkInbBefore.clients[0].email
+      },
+      upload: 99999,
+      download: 99999,
+      chains: ['direct'],
+      rule: `inbound=[${hkInbBefore.tag}] => direct`
+    }
+  ];
+
+  const mockRemoteClash = http.createServer((reqM, resM) => {
+    if (reqM.method === 'GET' && reqM.url === '/connections') {
+      resM.writeHead(200, { 'content-type': 'application/json' });
+      resM.end(JSON.stringify({ connections: mockRemoteConns }));
+    } else if (reqM.method === 'DELETE' && reqM.url.startsWith('/connections/')) {
+      closedRemoteConnIds.push(decodeURIComponent(reqM.url.slice('/connections/'.length)));
+      resM.writeHead(204);
+      resM.end();
+    }
+  });
+  await new Promise((r) => mockRemoteClash.listen(0, '127.0.0.1', r));
+  const remoteClashPort = mockRemoteClash.address().port;
+
+  try {
+    applySyncedPayload(
+      {
+        configHash: compiled.configHash,
+        singboxConfig: compiled.singboxConfig,
+        inboundPolicies: compiled.inboundPolicies,
+        certificates: compiled.certificates
+      },
+      { configPath: agentConfigPath, statePath: agentStatePath, clashPort: remoteClashPort }
+    );
+
+    // Poll #1 on Agent: catches dev1 & dev2, and immediately kicks dev3-excess!
+    await pollLocalClashTraffic({
+      configPath: agentConfigPath,
+      statePath: agentStatePath,
+      clashPort: remoteClashPort,
+      skipAutoHeartbeat: true
+    });
+    await new Promise((r) => setTimeout(r, 60));
+
+    assert.ok(closedRemoteConnIds.includes('conn-v2rayn-dev3-excess'), 'Remote Agent must terminate 3rd excess device connection via Clash API DELETE');
+    assert.ok(!closedRemoteConnIds.includes('conn-v2rayn-dev1') && !closedRemoteConnIds.includes('conn-v2rayn-dev2'), 'First 2 allowed devices on remote Relay must remain 100% uninterrupted');
+
+    // Simulate short-lived v2rayN Ctrl+R latency test: connections close BEFORE heartbeat is sent!
+    mockRemoteConns = [];
+
+    // Send heartbeat to Master Panel: 60s rolling session lease on Agent must STILL report 2 online devices & flush traffic deltas!
+    const hbRes = await sendHeartbeat({
+      master: `${baseUrl}/SecPath16Chars99`,
+      token: isvNode.token,
+      nodeId: isvNode.id,
+      configPath: agentConfigPath,
+      statePath: agentStatePath,
+      clashPort: remoteClashPort
+    });
+    assert.equal(hbRes.ok, true);
+
+    // 3. Query GET /api/inbounds on Master Panel and verify HK-Isvoro (:35405) & its client show real-time online devices, updated lastOnline, and incremented traffic!
+    const inbsRes = await req('/SecPath16Chars99/api/inbounds');
+    assert.equal(inbsRes.status, 200);
+    const hkInbAfter = inbsRes.json.inbounds.find((i) => i.id === hkInbBefore.id);
+    assert.ok(hkInbAfter);
+    assert.equal(hkInbAfter.activeDeviceCount, 2, 'HK-Isvoro must show 2 online devices (● 在线 2 设备) even after short v2rayN connection closed');
+    assert.equal(hkInbAfter.activeIpCount, 2, 'HK-Isvoro must show 2 online IPs');
+    assert.deepEqual(hkInbAfter.activeIps, ['120.82.201.160', '120.82.201.161']);
+    assert.equal(hkInbAfter.up, prevUp + 524288 + 262144, 'HK-Isvoro upload traffic must increment by allowed devices traffic');
+    assert.equal(hkInbAfter.down, prevDown + 2097152 + 1048576, 'HK-Isvoro download traffic must increment by allowed devices traffic');
+    assert.ok(Math.abs(Date.now() - hkInbAfter.lastOnline) < 10000, 'HK-Isvoro lastOnline must update to current timestamp');
+
+    // Verify expanded client row (clients[0]) ALSO shows 2 online devices, 2 online IPs, current lastOnline, and incremented traffic!
+    const c0After = hkInbAfter.clients[0];
+    assert.equal(c0After.activeDeviceCount, 2, 'Client row must also show 2 online devices (🟢 在线 2 设备)');
+    assert.equal(c0After.activeIpCount, 2, 'Client row must also show 2 online IPs');
+    assert.equal(c0After.up, prevClientUp + 524288 + 262144, 'Client upload traffic must increment');
+    assert.equal(c0After.down, prevClientDown + 2097152 + 1048576, 'Client download traffic must increment');
+    assert.ok(Math.abs(Date.now() - c0After.lastOnline) < 10000, 'Client lastOnline must update to current timestamp instead of staying at pre-migration date');
+  } finally {
+    await new Promise((r) => mockRemoteClash.close(r));
+    fs.rmSync(tempAgentDir, { recursive: true, force: true });
   }
 });
