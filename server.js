@@ -84,13 +84,13 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.16';
+const VERSION = '1.0.17';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
 
 const store = new Store(DATA_FILE);
-const sessions = new SessionManager(24);
+const sessions = new SessionManager(168, path.join(path.dirname(DATA_FILE), "sessions.json"));
 sessions.setMaxAgeMinutes(store.state.settings.sessionMaxAge || 720);
 const singbox = new SingboxManager(store);
 const loginAttempts = new Map();

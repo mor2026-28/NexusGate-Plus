@@ -294,9 +294,14 @@ function openConfirmModal(title, message, onConfirm) {
 }
 
 function showLogin() {
+  closeModal();
   state.session = null;
   $('#app').classList.add('hidden');
   $('#login').classList.remove('hidden');
+}
+
+function getClusterNodesList() {
+  return (state.nodes && state.nodes.length) ? state.nodes : (state.overview?.nodes || []);
 }
 
 function showApp() {
@@ -524,7 +529,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.16 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.17 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -592,7 +597,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.16</span>
+          <span class="tag">NexusGate Plus v1.0.17</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -4579,7 +4584,7 @@ function openReplacePrimaryModal(targetNode) {
   const suggestedStandbyName = (targetNode.name || "").includes("备用") || (targetNode.name || "").includes("热备")
     ? targetNode.name
     : `${targetNode.name}-共享热备`;
-  const existingStandbys = (state.nodes || []).filter((x) => x.id !== targetNode.id && !x.isLocal);
+  const existingStandbys = getClusterNodesList().filter((x) => x.id !== targetNode.id && !x.isLocal);
   const standbyOpts = [
     '<option value="">暂不额外绑定其他备用机</option>',
     ...existingStandbys.map((x) => `<option value="${esc(x.id)}"${selected(x.id, targetNode.standbyNodeId)}>${esc(x.name)} (${esc(x.host)} · ${x.role === "standby" ? "共享热备机" : "集群节点"})</option>`)
@@ -5084,12 +5089,14 @@ document.addEventListener('click', async (e) => {
       `);
     }
     else if (action === 'open-replace-primary-modal') {
-      const node = (state.nodes || []).find((x) => x.id === actEl.dataset.id);
+      const node = getClusterNodesList().find((x) => x.id === actEl.dataset.id);
       if (node) openReplacePrimaryModal(node);
+      else toast('节点数据正在同步，请稍后再试', true);
     }
     else if (action === 'open-failover-modal') {
-      const node = (state.nodes || []).find((x) => x.id === actEl.dataset.id);
+      const node = getClusterNodesList().find((x) => x.id === actEl.dataset.id);
       if (node) openFailoverModal(node);
+      else toast('节点数据正在同步，请稍后再试', true);
     }
     else if (action === 'trigger-failback') {
       if (!ngConfirm('确认主力中转机已恢复正常，并将流量与 Cloudflare DNS 解析切回主力机吗？')) return;

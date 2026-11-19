@@ -4007,7 +4007,7 @@ test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Mas
 
     const jsRes = await req(`${prefix}/api/cluster/nexus-agent.js`);
     assert.equal(jsRes.status, 200);
-    assert.ok(jsRes.text.includes('1.0.16'), 'nexus-agent.js must be v1.0.16');
+    assert.ok(jsRes.text.includes('1.0.17'), 'nexus-agent.js must be v1.0.17');
   }
 
   // 2. Issue a valid Let's Encrypt-like CA cert for Master Panel (zz.vponlive.com) and bind it to Master Panel
@@ -4497,4 +4497,83 @@ test('36. v1.0.16 Primary Takeover / Demote Backup to 1-to-N Shared Standby (rep
   assert.equal(fbBRes.status, 200);
   const standbyFinalCfg = await req(`/SecPath16Chars99/api/cluster/nodes/${sharedStandbyNode.id}/config`);
   assert.equal(standbyFinalCfg.json.singboxConfig.inbounds.length, 0, 'Shared Standby S returns to clean idle state ready for next rotation');
+});
+
+
+test('37. v1.0.17 Disk-Persisted Sliding Sessions (Zero 401 Jump-to-Login Across Restarts), Failed-Over Node Primary Takeover Release & SOCKS5 TCP-Only Outbound', async () => {
+  const { SessionManager } = require('../lib/auth');
+  const { toSingboxOutbound } = require('../lib/protocols');
+  const sessFile = path.join(os.tmpdir(), `ng-sess-test-${Date.now()}.json`);
+  try {
+    // 1. Verify SessionManager persists active sessions to disk and restores them after simulated panel restart
+    const sm1 = new SessionManager(168, sessFile);
+    const created = sm1.create('admin_1', 'morcky2899882');
+    assert.ok(fs.existsSync(sessFile), 'sessions.json must be written to disk');
+
+    const sm2 = new SessionManager(168, sessFile);
+    const restored = sm2.get({ headers: { cookie: `ng_session=${encodeURIComponent(created.id)}` } });
+    assert.ok(restored, 'Session must survive server restart without forcing 401 jump-to-login');
+    assert.equal(restored.username, 'morcky2899882');
+    assert.equal(restored.csrf, created.csrf);
+
+    // 2. Verify SOCKS5 outbound supports explicit network: "tcp" for residential proxies with UDP disabled
+    const sbSocksTcp = toSingboxOutbound({
+      tag: '伊拉克',
+      type: 'socks',
+      server: '109.127.81.223',
+      port: 6011,
+      username: 'lumi-r1aoacj2ymy8',
+      password: 'COYvIzTAop1ayXgn',
+      network: 'tcp'
+    });
+    assert.equal(sbSocksTcp.network, 'tcp', 'SOCKS5 outbound must preserve network: "tcp" when set');
+
+    // 3. Verify replacing a Primary Relay that is CURRENTLY failed over to an existing Standby ("hk is-evox hk 02")
+    const isvRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'isvoro HK备用-t37', role: 'relay', host: 'hk.8668168.xyz', domain: 'hk.8668168.xyz' })
+    });
+    assert.equal(isvRes.status, 201);
+    const isvNode = isvRes.json.node;
+
+    const stRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'hk is-evox hk 02', role: 'standby', host: '195.58.149.21' })
+    });
+    assert.equal(stRes.status, 201);
+    const stNode = stRes.json.node;
+
+    const inbRes = await req('/SecPath16Chars99/api/inbounds', {
+      method: 'POST',
+      body: JSON.stringify({ nodeId: isvNode.id, remark: 'HK-Isvoro-37', protocol: 'vless', port: 45405, security: 'reality' })
+    });
+    assert.equal(inbRes.status, 201);
+
+    // Fail over isvoro HK备用 -> hk is-evox hk 02
+    const foRes = await req('/SecPath16Chars99/api/cluster/failover', {
+      method: 'POST',
+      body: JSON.stringify({ primaryNodeId: isvNode.id, standbyNodeId: stNode.id })
+    });
+    assert.equal(foRes.status, 200);
+    const stBusy = await req(`/SecPath16Chars99/api/cluster/nodes/${stNode.id}/config`);
+    assert.equal(stBusy.json.singboxConfig.inbounds.length, 1, 'Standby hk is-evox hk 02 must hold the failed-over inbound');
+
+    // Now run replace-primary (replace_in_place) on the failed-over node -> hk is-evox hk 02 must be automatically released!
+    const repRes = await req(`/SecPath16Chars99/api/cluster/nodes/${isvNode.id}/replace-primary`, {
+      method: 'POST',
+      body: JSON.stringify({
+        mode: 'replace_in_place',
+        newPrimaryName: 'isvoro HK主力',
+        newPrimaryHost: '45.77.10.22',
+        standbyNodeId: stNode.id,
+        switchCfDns: false
+      })
+    });
+    assert.equal(repRes.status, 200);
+    assert.equal(repRes.json.ok, true);
+    const stAfter = await req(`/SecPath16Chars99/api/cluster/nodes/${stNode.id}/config`);
+    assert.equal(stAfter.json.singboxConfig.inbounds.length, 0, 'Previously active failover standby must be released to idle after primary replacement');
+  } finally {
+    try { fs.unlinkSync(sessFile); } catch {}
+  }
 });
