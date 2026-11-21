@@ -529,7 +529,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.17 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.18 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -597,7 +597,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.17</span>
+          <span class="tag">NexusGate Plus v1.0.18</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -820,7 +820,7 @@ function renderCluster() {
           </div>
         </div>
 
-        ${(n.role === 'exit' || n.role === 'hybrid') && n.exitConfig?.enabled !== false ? `
+        ${(n.role === 'exit' || n.role === 'hybrid') && n.exitConfig?.enabled === true ? `
           <div style="font-size:12px;padding:8px 11px;border-radius:9px;background:var(--success-soft);color:var(--success);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px">
             <span><b>⇄ 全局共享落地 SS 已激活</b>：<code>${esc(n.host)}:${n.exitConfig?.port || 28388}</code></span>
             <code>${esc(n.exitConfig?.method || '2022-blake3-aes-128-gcm')}</code>
@@ -4415,7 +4415,7 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
         服务器角色类型
         <select name="role" id="cluster-role-select">
           <option value="relay"${selected('relay', n.role)}>中转入口机 (Relay · 绑定各自独立域名承载客户)</option>
-          <option value="exit"${selected('exit', n.role)}>纯落地机 (Exit · 免域名纯IP，自动开启SS加入全局共享落地池)</option>
+          <option value="exit"${selected('exit', n.role)}>纯落地机 (Exit · 免域名纯IP，不自动建节点，支持手动建节点与内网/公网出站)</option>
           <option value="hybrid"${selected('hybrid', n.role)}>中转 + 落地一体机 (Hybrid · 兼具入口与共享SS落地)</option>
           <option value="standby"${selected('standby', n.role)}>热备容灾机 (Standby · 主力中转故障时秒级接管)</option>
         </select>
@@ -4437,7 +4437,14 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
       </div>
 
       <div id="cluster-exit-ss-wrap" class="form-grid wide" style="margin:0;${showExitSection ? '' : 'display:none'}">
-        <div class="section-title">落地机自动开启共享 SS 与落地容错配置 (仅当角色为「纯落地机」或「一体机」时生效)</div>
+        <div class="section-title">落地机节点与可选共享 SS 配置 (默认不自动创建节点与出站)</div>
+        <div class="wide" style="padding:10px 12px;border-radius:9px;background:var(--primary-soft);color:var(--primary);font-size:12px;line-height:1.55">
+          <b>推荐模式（默认）</b>：添加落地机并安装 Agent 后，系统<b>不会</b>自动创建任何默认节点或自动生成出站，避免覆盖您自定义的内网 IP（如 <code>10.240.28.3</code>）。请直接在<b>【入站节点管理】</b>选择该落地机自行创建节点，再到<b>【出站规则】</b>手动添加对应公网或内网 IP 出站即可。
+        </div>
+        <label class="wide" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+          <input type="checkbox" name="enableAutoExitSs" id="enable-auto-exit-ss-chk" ${n.exitConfig?.enabled === true ? 'checked' : ''} style="width:auto">
+          <span>同时自动开启快捷共享 SS 端口（默认关闭，仅需自动注册全局共享 SS 池时勾选）</span>
+        </label>
         <label>
           落地 Shadowsocks 监听端口
           <input name="exitPort" type="number" value="${esc(n.exitConfig?.port || 28388)}" placeholder="28388" autocomplete="off">
@@ -6070,7 +6077,7 @@ document.addEventListener('submit', async (e) => {
       const syncMode = data.standbySyncMode || 'on_change';
       const payload = {
         ...data,
-        exitEnabled: isExitLike,
+        exitEnabled: isExitLike && Boolean(form.querySelector('input[name="enableAutoExitSs"]')?.checked),
         standbySyncMode: syncMode,
         mirrorStandby: syncMode !== 'on_failover',
         autoFailover: Number(data.autoFailoverMinutes || 3) > 0,

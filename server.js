@@ -84,7 +84,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.17';
+const VERSION = '1.0.18';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -361,10 +361,21 @@ function buildAutoRuleRemark(inboundList, outboundTag) {
 function syncInboundRelayToRoutingRule(st, inbound) {
   if (!st.routing) st.routing = { final: 'direct', rules: [] };
   if (!Array.isArray(st.routing.rules)) st.routing.rules = [];
+  const targetNodeId = inbound.nodeId || 'node_local';
+  const isPureInboundRule = (r) => Array.isArray(r.inbound) && r.inbound.length > 0 &&
+    !r.domain?.length && !r.domain_suffix?.length && !r.domain_keyword?.length &&
+    !r.ip_cidr?.length && !r.port?.length && !r.protocol?.length && !r.ip_is_private;
+  const matchesNode = (r) => !r.nodeId || r.nodeId === 'all' || r.nodeId === targetNodeId;
+
+  // Strip inbound.tag from any multi-inbound pure-relay rule on this node so switching outboundTag never leaves stale bindings
+  for (const r of st.routing.rules) {
+    if (isPureInboundRule(r) && matchesNode(r) && r.inbound.length > 1 && r.inbound.includes(inbound.tag)) {
+      r.inbound = r.inbound.filter((t) => t !== inbound.tag);
+    }
+  }
 
   const existingIdx = st.routing.rules.findIndex(
-    (r) => Array.isArray(r.inbound) && r.inbound.length === 1 && r.inbound[0] === inbound.tag &&
-      !r.domain?.length && !r.domain_suffix?.length && !r.ip_cidr?.length && !r.port?.length && !r.protocol?.length && !r.ip_is_private
+    (r) => isPureInboundRule(r) && matchesNode(r) && r.inbound.length === 1 && r.inbound[0] === inbound.tag
   );
 
   if (inbound.outboundTag && inbound.outboundTag !== 'default') {
@@ -1077,6 +1088,7 @@ function normalizeInboundPayload(body, existing = null) {
   const publicHost = String(body.publicHost ?? existing?.publicHost ?? '').trim();
   const enable = body.enable !== undefined ? Boolean(body.enable) : (existing ? existing.enable !== false : true);
   const outboundTag = String(body.outboundTag ?? existing?.outboundTag ?? 'default').trim();
+  const exposeAsOutbound = Boolean(body.exposeAsOutbound !== undefined ? body.exposeAsOutbound : existing?.exposeAsOutbound);
 
   const limitIp = Math.max(0, Number(body.limitIp ?? existing?.limitIp ?? 0));
   const limitDevice = Math.max(0, Number(body.limitDevice ?? existing?.limitDevice ?? 0));
@@ -1106,6 +1118,7 @@ function normalizeInboundPayload(body, existing = null) {
     security,
     transport,
     outboundTag,
+    exposeAsOutbound,
     limitIp,
     limitDevice,
     up: Number(body.up ?? existing?.up ?? 0),
@@ -2800,7 +2813,7 @@ async function handleRequest(req, res) {
           cfRecordName: String(body.cfRecordName || domain || '').trim(),
           cfProxied: Boolean(body.cfProxied),
           exitConfig: {
-            enabled: (role === 'exit' || role === 'hybrid') && body.exitEnabled !== false,
+            enabled: (role === 'exit' || role === 'hybrid') && Boolean(body.exitEnabled === true || body.exitConfig?.enabled === true),
             protocol: 'shadowsocks',
             port: exitPort,
             method: exitMethod,
@@ -2904,7 +2917,7 @@ async function handleRequest(req, res) {
           const ec = existing.exitConfig || {};
           const nextMethod = normalizeSsMethod(body.exitMethod || body.exitConfig?.method || ec.method || '2022-blake3-aes-128-gcm');
           existing.exitConfig = {
-            enabled: existing.role === 'exit' || existing.role === 'hybrid',
+            enabled: (existing.role === 'exit' || existing.role === 'hybrid') && Boolean(body.exitEnabled !== undefined ? body.exitEnabled : (body.exitConfig?.enabled !== undefined ? body.exitConfig.enabled : ec.enabled === true)),
             protocol: 'shadowsocks',
             port: Number(body.exitPort || body.exitConfig?.port || ec.port || 28388),
             method: nextMethod,

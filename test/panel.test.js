@@ -2055,7 +2055,7 @@ test('21. NexusGate Plus v1.0.0 Cluster Architecture: Multi-Relay Independent Do
     method: 'POST',
     body: JSON.stringify({
       name: '美国洛杉矶原生落地 01',
-      role: 'exit',
+      role: 'exit', exitEnabled: true,
       host: '198.51.100.88',
       exitPort: 38388,
       exitMethod: '2022-blake3-aes-128-gcm'
@@ -2179,7 +2179,7 @@ test('22. End-to-End Multi-Relay & Exit Simulation: Create Nodes on Exit Servers
     method: 'POST',
     body: JSON.stringify({
       name: '英国伦敦纯落地机 E1',
-      role: 'exit',
+      role: 'exit', exitEnabled: true,
       host: '185.199.108.55'
     })
   });
@@ -2196,6 +2196,7 @@ test('22. End-to-End Multi-Relay & Exit Simulation: Create Nodes on Exit Servers
     method: 'POST',
     body: JSON.stringify({
       nodeId: ukExitNode.id,
+      exposeAsOutbound: true,
       remark: '英国落地SS节点-51888',
       protocol: 'shadowsocks',
       port: 51888,
@@ -2599,7 +2600,7 @@ test('24. v1.0.3 Deep Audit & Extreme Multi-Node Scale Simulation: 10 Non-Domain
   for (let e = 1; e <= 25; e += 1) {
     exitBatch.push({
       name: `落地机-${e}`,
-      role: 'exit',
+      role: 'exit', exitEnabled: true,
       host: `198.18.20.${e}`,
       exitPort: 30000 + e,
       exitMethod: '2022-blake3-aes-128-gcm'
@@ -2700,7 +2701,7 @@ test('25. v1.0.4 Full Master .zip Disaster Recovery Clone (Port/Path/Account/Cer
       method: 'POST',
       body: JSON.stringify({
         name: `全球原生落地机-E${e}`,
-        role: 'exit',
+        role: 'exit', exitEnabled: true,
         host: `198.19.30.${e}`,
         exitPort: 31000 + e,
         exitMethod: '2022-blake3-aes-128-gcm',
@@ -3098,7 +3099,7 @@ test('27. v1.0.6 Full-Stack Zero-to-End Audit: 10 Distinct-Domain Relays (30 Cli
     method: 'POST',
     body: JSON.stringify({
       name: 'v106-日本原生落地-E1',
-      role: 'exit',
+      role: 'exit', exitEnabled: true,
       host: '203.0.113.201',
       exitPort: 29388,
       exitMethod: '2022-blake3-aes-128-gcm'
@@ -4007,7 +4008,7 @@ test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Mas
 
     const jsRes = await req(`${prefix}/api/cluster/nexus-agent.js`);
     assert.equal(jsRes.status, 200);
-    assert.ok(jsRes.text.includes('1.0.17'), 'nexus-agent.js must be v1.0.17');
+    assert.ok(jsRes.text.includes('1.0.18'), 'nexus-agent.js must be v1.0.18');
   }
 
   // 2. Issue a valid Let's Encrypt-like CA cert for Master Panel (zz.vponlive.com) and bind it to Master Panel
@@ -4576,4 +4577,96 @@ test('37. v1.0.17 Disk-Persisted Sliding Sessions (Zero 401 Jump-to-Login Across
   } finally {
     try { fs.unlinkSync(sessFile); } catch {}
   }
+});
+
+
+test('38. v1.0.18 Clean Exit Node Mode (Zero Auto-Created Inbounds/Outbounds), Manual Private LAN IP (10.240.28.3) Outbound Persistence & Multi-Inbound Rule Switch Cleanup', async () => {
+  // 1. Add US PPF Relay (68.164.13.50, LAN 10.240.28.2) and PPF Exit (140.235.229.28, LAN 10.240.28.3) with default settings (NO exitEnabled!)
+  const outCountBefore = (await req('/SecPath16Chars99/api/outbounds')).json.outbounds.length;
+
+  const ppfRelayRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'US PPF-t38', role: 'relay', host: '68.164.13.50', domain: 'ppf.onliveme.com' })
+  });
+  assert.equal(ppfRelayRes.status, 201);
+  const ppfRelay = ppfRelayRes.json.node;
+
+  const ppfExitRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'PPF 落地-t38', role: 'exit', host: '140.235.229.28' })
+  });
+  assert.equal(ppfExitRes.status, 201);
+  const ppfExit = ppfExitRes.json.node;
+  assert.equal(ppfExit.exitConfig.enabled, false, 'New Exit node must NOT auto-enable default SS :28388');
+
+  // Verify 0 auto-created outbounds and 0 auto-created inbounds on PPF Exit!
+  const outAfterExitAdd = (await req('/SecPath16Chars99/api/outbounds')).json.outbounds;
+  assert.equal(outAfterExitAdd.length, outCountBefore, 'Adding an Exit node must NOT auto-create any shared SS outbound');
+
+  const exitCfgEmpty = await req(`/SecPath16Chars99/api/cluster/nodes/${ppfExit.id}/config`);
+  assert.equal(exitCfgEmpty.status, 200);
+  assert.equal(exitCfgEmpty.json.singboxConfig.inbounds.length, 0, 'Fresh Exit node must have 0 auto-created inbounds');
+
+  // 2. User manually creates SS inbound "ffp19.9内网" (:44849) on PPF Exit
+  const exitInbRes = await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify({
+      nodeId: ppfExit.id,
+      remark: 'ffp19.9内网',
+      protocol: 'shadowsocks',
+      port: 44849,
+      method: 'aes-128-gcm',
+      password: 'PpfLanPass2026Strong!'
+    })
+  });
+  assert.equal(exitInbRes.status, 201);
+
+  // Verify creating an inbound on PPF Exit STILL does NOT auto-clone it into state.outbounds!
+  const outAfterInbAdd = (await req('/SecPath16Chars99/api/outbounds')).json.outbounds;
+  assert.equal(outAfterInbAdd.length, outCountBefore, 'Creating a manual inbound on Exit node must NOT auto-clone into outbounds');
+
+  // 3. User manually creates a private LAN IP outbound (10.240.28.3:44849) in Outbounds
+  const lanOutRes = await req('/SecPath16Chars99/api/outbounds', {
+    method: 'POST',
+    body: JSON.stringify({
+      tag: 'ppf-lan-199',
+      remark: 'PPF19.9内网直连',
+      type: 'shadowsocks',
+      server: '10.240.28.3',
+      port: 44849,
+      method: 'aes-128-gcm',
+      password: 'PpfLanPass2026Strong!'
+    })
+  });
+  assert.equal(lanOutRes.status, 201);
+
+  // 4. User creates VLESS inbound "US-28-19" (:35751) on US PPF Relay and binds it to manual LAN outbound "ppf-lan-199"
+  const relayInbRes = await req('/SecPath16Chars99/api/inbounds', {
+    method: 'POST',
+    body: JSON.stringify({
+      nodeId: ppfRelay.id,
+      remark: 'US-28-19',
+      protocol: 'vless',
+      port: 35751,
+      security: 'reality',
+      outboundTag: 'ppf-lan-199'
+    })
+  });
+  assert.equal(relayInbRes.status, 201);
+
+  // Trigger cluster config compilation & verify LAN IP 10.240.28.3 is NEVER overwritten to 140.235.229.28 and uot is NOT forced on!
+  const relayCfg = await req(`/SecPath16Chars99/api/cluster/nodes/${ppfRelay.id}/config`);
+  assert.equal(relayCfg.status, 200);
+  const compiledLanOut = relayCfg.json.singboxConfig.outbounds.find((o) => o.tag === 'ppf-lan-199');
+  assert.ok(compiledLanOut, 'Manual LAN outbound must be present in US PPF config');
+  assert.equal(compiledLanOut.server, '10.240.28.3', 'Manual LAN IP 10.240.28.3 must NEVER be overwritten');
+  assert.equal(compiledLanOut.server_port, 44849);
+  assert.equal(compiledLanOut.udp_over_tcp, undefined, 'Manual SS outbound must NOT force udp_over_tcp: true');
+
+  const relayRule = relayCfg.json.singboxConfig.route.rules.find((r) => Array.isArray(r.inbound) && r.inbound.includes(relayInbRes.json.inbound.tag));
+  assert.ok(relayRule && relayRule.outbound === 'ppf-lan-199', 'US-28-19 must cleanly route to ppf-lan-199');
+
+  const exitCfg = await req(`/SecPath16Chars99/api/cluster/nodes/${ppfExit.id}/config`);
+  assert.equal(exitCfg.json.singboxConfig.inbounds.length, 1, 'PPF Exit must have ONLY the 1 user-created inbound (:44849)');
+  assert.equal(exitCfg.json.singboxConfig.inbounds[0].listen_port, 44849);
 });

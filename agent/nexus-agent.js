@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.17)
+ * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.18)
  * Zero external npm dependencies · < 15 MB RAM footprint
  * Supports Relay Node, Exit Node (SS/SS2022/VMess), and Hot-Standby Failover Node.
  * Features:
@@ -27,7 +27,7 @@ const https = require('node:https');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 
-const AGENT_VERSION = '1.0.17';
+const AGENT_VERSION = '1.0.18';
 const ACTIVE_LEASE_TTL_MS = 60000;
 const EXCESS_IP_BLOCK_TTL_MS = 60000;
 
