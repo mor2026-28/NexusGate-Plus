@@ -530,7 +530,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.21 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.22 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -598,7 +598,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.21</span>
+          <span class="tag">NexusGate Plus v1.0.22</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -815,7 +815,7 @@ function renderCluster() {
                     : (activeFoObj
                         ? `⚠ 已接管至 ${esc(activeFoObj.name)}`
                         : (standbyObj
-                            ? `🛡 ${esc(standbyObj.name)} · ${n.autoFailover !== false ? `${n.autoFailoverMinutes || 3}m自切` : '手动'} (${n.standbySyncMode === 'daily' ? '每日备份' : (n.standbySyncMode === 'on_failover' ? '按需下发·1对多共享' : '变更同步·0流量')})`
+                            ? `🛡 ${esc(standbyObj.name)} · ${`${n.autoFailover !== false ? `失联${n.autoFailoverMinutes || 3}m` : '失联手动'}${(n.tcpBlockFailoverMinutes !== undefined ? Number(n.tcpBlockFailoverMinutes) : (n.tcpBlockFailover === false ? 0 : 20)) > 0 ? ` / 三网${n.tcpBlockFailoverMinutes ?? 20}m` : ''}`} (${n.standbySyncMode === 'daily' ? '每日备份' : (n.standbySyncMode === 'on_failover' ? '按需下发·1对多共享' : '变更同步·0流量')})`
                             : '未绑定热备机')))
             }</b>
           </div>
@@ -831,8 +831,9 @@ function renderCluster() {
           const clr = isAllBlk ? 'var(--danger)' : (tp.blockedCount > 0 ? 'var(--warning)' : 'var(--success)');
           const itemsStr = tp.results.map((r) => `${esc(r.name.replace(/^深圳|^广东/, ''))} ${r.ok ? `${r.ms}ms` : '断流'}`).join(' · ');
           const blkMins = isAllBlk && n.tcpBlockedSince ? Math.max(1, Math.floor((Date.now() - Date.parse(n.tcpBlockedSince)) / 60000)) : 0;
+          const tcpLimMin = n.tcpBlockFailoverMinutes !== undefined ? Number(n.tcpBlockFailoverMinutes) : (n.tcpBlockFailover === false ? 0 : 20);
           const tail = isAllBlk
-            ? `🔴 三网断流 ${blkMins}/${n.autoFailoverMinutes || 20}m`
+            ? (tcpLimMin > 0 ? `🔴 三网断流 ${blkMins}/${tcpLimMin}m` : `🔴 三网断流 ${blkMins}m (仅监测)`)
             : (tp.blockedCount > 0 ? '🟡 部分丢包' : '🟢 三网畅通');
           return `<div style="font-size:11.5px;padding:6px 10px;border-radius:8px;background:${bg};color:${clr};display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;font-weight:650"><span>${tail}</span><span>${itemsStr}</span></div>`;
         })() : ''}
@@ -4549,17 +4550,26 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
           </select>
         </label>
         <label>
-          断线 / 三网 TCP 断流容灾切换模式 (机器失联 OR 三网全断流满设定时长自动切备用)
+          机器失联自动容灾模式 (机器宕机/断网超时切换，与右侧三网断流独立生效)
           <select name="autoFailoverMinutes" id="cluster-autofo-mode-select">
-            <option value="0"${selected('0', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>🔒 仅手动切换模式 (关闭自动切换 · 平时绝不自动动IP，需要时由人工点击【⚡一键容灾切换】)</option>
-            <option value="1"${selected('1', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 1 分钟自动切换 (极速敏感)</option>
-            <option value="2"${selected('2', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 2 分钟自动切换</option>
-            <option value="3"${selected('3', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 3 分钟自动切换 (推荐 · 双重探测防网络抖动误判)</option>
-            <option value="5"${selected('5', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 5 分钟自动切换</option>
-            <option value="10"${selected('10', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续断线 10 分钟自动切换</option>
-            <option value="15"${selected('15', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续失联或三网断流 15 分钟自动切换</option>
-            <option value="20"${selected('20', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续失联或三网断流 20 分钟自动切换 (推荐防单TCP墙)</option>
-            <option value="30"${selected('30', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 自动模式：连续失联或三网断流 30 分钟自动切换</option>
+            <option value="0"${selected('0', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>🔒 仅手动切换模式 (关闭失联自动切换)</option>
+            <option value="1"${selected('1', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 连续失联 1 分钟自动切换 (极速敏感)</option>
+            <option value="2"${selected('2', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 连续失联 2 分钟自动切换</option>
+            <option value="3"${selected('3', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 连续失联 3 分钟自动切换 (推荐 · 双重探测防误判)</option>
+            <option value="5"${selected('5', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 连续失联 5 分钟自动切换</option>
+            <option value="10"${selected('10', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 连续失联 10 分钟自动切换</option>
+            <option value="15"${selected('15', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 连续失联 15 分钟自动切换</option>
+            <option value="20"${selected('20', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 连续失联 20 分钟自动切换</option>
+            <option value="30"${selected('30', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 连续失联 30 分钟自动切换</option>
+          </select>
+        </label>
+        <label>
+          三网 TCP 断流自动容灾 (每 60s 测深电/广联/广移，三网全断自动切备用)
+          <select name="tcpBlockFailoverMinutes" id="cluster-tcpfo-mode-select">
+            <option value="0"${selected('0', String(n.tcpBlockFailoverMinutes !== undefined ? n.tcpBlockFailoverMinutes : (n.tcpBlockFailover === false ? 0 : 20)))}>🔒 关闭三网断流自动切换 (仅在卡片监测展示)</option>
+            <option value="10"${selected('10', String(n.tcpBlockFailoverMinutes !== undefined ? n.tcpBlockFailoverMinutes : (n.tcpBlockFailover === false ? 0 : 20)))}>🛡️ 三网同时断流满 10 分钟自动切换备用</option>
+            <option value="20"${selected('20', String(n.tcpBlockFailoverMinutes !== undefined ? n.tcpBlockFailoverMinutes : (n.tcpBlockFailover === false ? 0 : 20)))}>🛡️ 三网同时断流满 20 分钟自动切换备用 (推荐防单TCP墙)</option>
+            <option value="30"${selected('30', String(n.tcpBlockFailoverMinutes !== undefined ? n.tcpBlockFailoverMinutes : (n.tcpBlockFailover === false ? 0 : 20)))}>🛡️ 三网同时断流满 30 分钟自动切换备用</option>
           </select>
         </label>
         <label>
@@ -6172,7 +6182,8 @@ document.addEventListener('submit', async (e) => {
         mirrorStandby: syncMode !== 'on_failover',
         autoFailover: Number(data.autoFailoverMinutes || 3) > 0,
         autoFailoverMinutes: Math.max(1, Number(data.autoFailoverMinutes || 3)),
-        tcpBlockFailover: form.querySelector('input[name="tcpBlockFailover"]')?.checked !== false,
+        tcpBlockFailoverMinutes: Number(data.tcpBlockFailoverMinutes ?? 20),
+        tcpBlockFailover: Number(data.tcpBlockFailoverMinutes ?? 20) > 0,
         autoFailback: Boolean(form.querySelector('input[name="autoFailback"]')?.checked),
         fallbackExitNodeId: isExitLike ? (data.fallbackExitNodeId || '') : ''
       };

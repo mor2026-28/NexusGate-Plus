@@ -4008,7 +4008,7 @@ test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Mas
 
     const jsRes = await req(`${prefix}/api/cluster/nexus-agent.js`);
     assert.equal(jsRes.status, 200);
-    assert.ok(jsRes.text.includes('1.0.21'), 'nexus-agent.js must be v1.0.21');
+    assert.ok(jsRes.text.includes('1.0.22'), 'nexus-agent.js must be v1.0.22');
   }
 
   // 2. Issue a valid Let's Encrypt-like CA cert for Master Panel (zz.vponlive.com) and bind it to Master Panel
@@ -4919,8 +4919,8 @@ test('41. v1.0.21 3-Carrier TCP Block (Single-TCP GFW) 60s Probe & 20-Minute Dua
       domain: 'vm120.362353.xyz',
       standbyNodeId: standby.id,
       autoFailover: true,
-      autoFailoverMinutes: 20,
-      tcpBlockFailover: true,
+      autoFailoverMinutes: 3,
+      tcpBlockFailoverMinutes: 20,
       autoFailback: true
     })
   });
@@ -4958,7 +4958,12 @@ test('41. v1.0.21 3-Carrier TCP Block (Single-TCP GFW) 60s Probe & 20-Minute Dua
   });
   handleAgentHeartbeat(store, primary.id, primary.token, { tcpProbe: allBlockedProbe(t0) });
 
-  // At T + 19 minutes: machine is online and blocked for 19 min (< 20 min) -> must NOT failover yet!
+  // At T + 19 minutes: machine is online (recent heartbeat!) and blocked for 19 min (< 20 min) -> must NOT failover yet!
+  store.transact((st) => {
+    const n = st.nodes.find((x) => x.id === primary.id);
+    n.lastSeenAt = new Date(t0 + 19 * 60 * 1000 - 5000).toISOString();
+    n.status = 'online';
+  });
   const hc19 = await req('/SecPath16Chars99/api/cluster/health-check', {
     method: 'POST',
     body: JSON.stringify({ nowMs: t0 + 19 * 60 * 1000, skipActiveProbe: true })
@@ -5021,4 +5026,40 @@ test('41. v1.0.21 3-Carrier TCP Block (Single-TCP GFW) 60s Probe & 20-Minute Dua
   pObj = store.state.nodes.find((n) => n.id === primary.id);
   assert.equal(pObj.activeFailoverTo, '', 'After 3-carrier TCP recovers, autoFailback must restore Primary');
   assert.equal(pObj.tcpBlockedSince, '');
+
+  // 6. Test completely independent combination: Offline failover = OFF (仅手动, autoFailover: false), 3-Carrier TCP Block = 10 minutes!
+  const pIndepRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Indep-TCP10m-T41',
+      role: 'relay',
+      host: '154.21.120.2',
+      domain: 'indep10.362353.xyz',
+      standbyNodeId: standby.id,
+      autoFailover: false,
+      autoFailoverMinutes: 3,
+      tcpBlockFailoverMinutes: 10
+    })
+  });
+  assert.equal(pIndepRes.status, 201);
+  const pIndep = pIndepRes.json.node;
+  const tIndep = Date.now();
+  handleAgentHeartbeat(store, pIndep.id, pIndep.token, { tcpProbe: allBlockedProbe(tIndep) });
+  // At T + 9m -> must NOT trigger
+  await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: tIndep + 9 * 60 * 1000, skipActiveProbe: true })
+  });
+  assert.equal(store.state.nodes.find((n) => n.id === pIndep.id).activeFailoverTo, '', 'At 9m (< 10m), must NOT trigger');
+  // At T + 10m -> MUST trigger even though offline autoFailover is OFF!
+  store.transact((st) => {
+    const n = st.nodes.find((x) => x.id === pIndep.id);
+    n.lastSeenAt = new Date(tIndep + 10 * 60 * 1000 - 2000).toISOString();
+    n.status = 'online';
+  });
+  await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: tIndep + 10 * 60 * 1000, skipActiveProbe: true })
+  });
+  assert.equal(store.state.nodes.find((n) => n.id === pIndep.id).activeFailoverTo, standby.id, 'Independent 10m TCP block failover must trigger even when offline auto-failover is manual-only');
 });
