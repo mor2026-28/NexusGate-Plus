@@ -530,13 +530,33 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.22 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.23 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
   }
-  render();
-  load(page, { silent: true });
+  const nowTs = Date.now();
+  const hasCachedData =
+    (page === 'overview' && Boolean(state.overview)) ||
+    (page === 'cluster' && state.nodes.length > 0) ||
+    (page === 'inbounds' && state.inbounds.length > 0) ||
+    (page === 'outbounds' && state.outbounds.length > 0) ||
+    (page === 'routing' && (state.routing?.rules?.length || 0) > 0) ||
+    (page === 'subcenter' && state.subGroups.length > 0);
+  const lastFetched = state._lastPageFetchAt?.[page] || 0;
+  const doRender = () => {
+    render();
+    if (!hasCachedData || (nowTs - lastFetched) > 8000) {
+      if (!state._lastPageFetchAt) state._lastPageFetchAt = {};
+      state._lastPageFetchAt[page] = nowTs;
+      load(page, { silent: true });
+    }
+  };
+  if (typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(doRender);
+  } else {
+    doRender();
+  }
 }
 
 function getBaseSubscriptionUrl(subToken = '') {
@@ -598,7 +618,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.22</span>
+          <span class="tag">NexusGate Plus v1.0.23</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -879,12 +899,22 @@ function renderCluster() {
     </article>
   ` : '';
 
+  const nodeNameById = new Map(nodes.map((n) => [n.id, n.name.replace(/\s*\(Local Master\)/, '')]));
+  const inboundsByOutboundTag = new Map();
+  for (const inb of state.inbounds || []) {
+    if (!inb.outboundTag || inb.outboundTag === 'default') continue;
+    let bucket = inboundsByOutboundTag.get(inb.outboundTag);
+    if (!bucket) {
+      bucket = { count: 0, nodeNames: new Set() };
+      inboundsByOutboundTag.set(inb.outboundTag, bucket);
+    }
+    bucket.count += 1;
+    bucket.nodeNames.add(nodeNameById.get(inb.nodeId || 'node_local') || '主控本机');
+  }
   const exitPoolItems = customOutbounds.map((o) => {
-    const boundInbs = (state.inbounds || []).filter((i) => i.outboundTag === o.tag);
-    const usedNodeNames = [...new Set(boundInbs.map((i) => {
-      const rn = nodes.find((n) => n.id === (i.nodeId || 'node_local'));
-      return rn ? rn.name.replace(/\s*\(Local Master\)/, '') : '主控本机';
-    }))];
+    const bucket = inboundsByOutboundTag.get(o.tag);
+    const boundInbs = { length: bucket ? bucket.count : 0 };
+    const usedNodeNames = bucket ? [...bucket.nodeNames] : [];
     return `
       <div class="topo-route-item">
         <div style="min-width:0;flex:1">
@@ -4550,7 +4580,7 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
           </select>
         </label>
         <label>
-          机器失联自动容灾模式 (机器宕机/断网超时切换，与右侧三网断流独立生效)
+          机器失联自动容灾模式 (宕机/断网超时切备用)
           <select name="autoFailoverMinutes" id="cluster-autofo-mode-select">
             <option value="0"${selected('0', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>🔒 仅手动切换模式 (关闭失联自动切换)</option>
             <option value="1"${selected('1', String(n.autoFailover === false ? '0' : (n.autoFailoverMinutes || 3)))}>⚡ 连续失联 1 分钟自动切换 (极速敏感)</option>
@@ -4564,7 +4594,7 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
           </select>
         </label>
         <label>
-          三网 TCP 断流自动容灾 (每 60s 测深电/广联/广移，三网全断自动切备用)
+          三网 TCP 断流自动容灾 (60s 测深电/广联/广移)
           <select name="tcpBlockFailoverMinutes" id="cluster-tcpfo-mode-select">
             <option value="0"${selected('0', String(n.tcpBlockFailoverMinutes !== undefined ? n.tcpBlockFailoverMinutes : (n.tcpBlockFailover === false ? 0 : 20)))}>🔒 关闭三网断流自动切换 (仅在卡片监测展示)</option>
             <option value="10"${selected('10', String(n.tcpBlockFailoverMinutes !== undefined ? n.tcpBlockFailoverMinutes : (n.tcpBlockFailover === false ? 0 : 20)))}>🛡️ 三网同时断流满 10 分钟自动切换备用</option>
@@ -6503,6 +6533,7 @@ $('#sidebar-scrim')?.addEventListener('click', () => $('#app').classList.remove(
     const hasOpenInlineQr = Boolean(document.querySelector('#content .subscription-qr:not(.hidden)'));
     if (
       state.session &&
+      !document.hidden &&
       !$('#modal')?.open &&
       !isEditingField &&
       !recentlyScrolled &&
@@ -6511,5 +6542,5 @@ $('#sidebar-scrim')?.addEventListener('click', () => $('#app').classList.remove(
     ) {
       load(state.page, { silent: true });
     }
-  }, 5000);
+  }, 10000);
 })();

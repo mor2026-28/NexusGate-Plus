@@ -4008,7 +4008,7 @@ test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Mas
 
     const jsRes = await req(`${prefix}/api/cluster/nexus-agent.js`);
     assert.equal(jsRes.status, 200);
-    assert.ok(jsRes.text.includes('1.0.22'), 'nexus-agent.js must be v1.0.22');
+    assert.ok(jsRes.text.includes('1.0.23'), 'nexus-agent.js must be v1.0.23');
   }
 
   // 2. Issue a valid Let's Encrypt-like CA cert for Master Panel (zz.vponlive.com) and bind it to Master Panel
@@ -5062,4 +5062,62 @@ test('41. v1.0.21 3-Carrier TCP Block (Single-TCP GFW) 60s Probe & 20-Minute Dua
     body: JSON.stringify({ nowMs: tIndep + 10 * 60 * 1000, skipActiveProbe: true })
   });
   assert.equal(store.state.nodes.find((n) => n.id === pIndep.id).activeFailoverTo, standby.id, 'Independent 10m TCP block failover must trigger even when offline auto-failover is manual-only');
+});
+
+
+test('42. v1.0.23 Real Agent runThreeCarrierTcpProbe -> sendHeartbeat -> Master Panel Live tcpProbe Reporting E2E & 9-Node/127-Inbound/63-Outbound Cluster Render Benchmark', async () => {
+  const netMod = require('node:net');
+  const { runThreeCarrierTcpProbe, sendHeartbeat } = require('../agent/nexus-agent');
+
+  // Spin up 2 reachable local TCP servers (simulating CT & CU) and leave 3rd port closed (simulating CM)
+  const srvCt = netMod.createServer((s) => s.end());
+  const srvCu = netMod.createServer((s) => s.end());
+  await new Promise((r) => srvCt.listen(0, '127.0.0.1', r));
+  await new Promise((r) => srvCu.listen(0, '127.0.0.1', r));
+  const portCt = srvCt.address().port;
+  const portCu = srvCu.address().port;
+
+  try {
+    const nodeRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'LiveTcp-Relay-T42', role: 'relay', host: '104.233.228.96', domain: 't42.362353.xyz' })
+    });
+    assert.equal(nodeRes.status, 201);
+    const relayNode = nodeRes.json.node;
+
+    // 1. Run real runThreeCarrierTcpProbe inside Agent
+    const probeSnap = await runThreeCarrierTcpProbe([
+      { name: '深圳电信', host: '127.0.0.1', port: portCt },
+      { name: '广东联通', host: '127.0.0.1', port: portCu },
+      { name: '广东移动', host: '127.0.0.1', port: 1 }
+    ], 1500);
+    assert.equal(probeSnap.results.length, 3);
+    assert.equal(probeSnap.results[0].ok, true);
+    assert.equal(probeSnap.results[1].ok, true);
+    assert.equal(probeSnap.results[2].ok, false);
+    assert.equal(probeSnap.blockedCount, 1);
+    assert.equal(probeSnap.allBlocked, false);
+
+    // 2. Send real heartbeat from Agent to Master Panel
+    const hbRes = await sendHeartbeat({
+      master: `${baseUrl}/SecPath16Chars99`,
+      token: relayNode.token,
+      nodeId: relayNode.id,
+      skipClashPoll: true
+    });
+    assert.equal(hbRes.ok, true);
+
+    // 3. Verify GET /api/cluster/nodes immediately contains live tcpProbe with real ms latencies!
+    const nodesRes = await req('/SecPath16Chars99/api/cluster/nodes');
+    assert.equal(nodesRes.status, 200);
+    const updatedNode = nodesRes.json.nodes.find((n) => n.id === relayNode.id);
+    assert.ok(updatedNode && updatedNode.tcpProbe, 'Master Panel must store and return live tcpProbe from Agent heartbeat');
+    assert.equal(updatedNode.tcpProbe.results.length, 3);
+    assert.ok(updatedNode.tcpProbe.results[0].ms >= 1, 'Shenzhen CT latency ms must be reported');
+    assert.ok(updatedNode.tcpProbe.results[1].ms >= 1, 'Guangdong CU latency ms must be reported');
+    assert.equal(updatedNode.tcpProbe.results[2].ok, false, 'Guangdong CM failure must be reported');
+  } finally {
+    await new Promise((r) => srvCt.close(r));
+    await new Promise((r) => srvCu.close(r));
+  }
 });

@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.22)
+ * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.23)
  * Zero external npm dependencies · < 15 MB RAM footprint
  * Supports Relay Node, Exit Node (SS/SS2022/VMess), and Hot-Standby Failover Node.
  * Features:
@@ -27,7 +27,7 @@ const https = require('node:https');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 
-const AGENT_VERSION = '1.0.22';
+const AGENT_VERSION = '1.0.23';
 const ACTIVE_LEASE_TTL_MS = 60000;
 const EXCESS_IP_BLOCK_TTL_MS = 60000;
 
@@ -1072,7 +1072,8 @@ async function sendHeartbeat(customOpts = {}) {
       inboundDeltas: snapshotInb,
       clientDeltas: snapshotCli,
       outboundDeltas: snapshotOut,
-      inboundOnline: latestInboundOnline
+      inboundOnline: latestInboundOnline,
+      ...(latestTcpProbe ? { tcpProbe: latestTcpProbe } : {})
     });
 
     const targetUrl = (usingStandbyMaster && standbyUrl) ? standbyUrl : primaryUrl;
@@ -1123,6 +1124,9 @@ async function sendHeartbeat(customOpts = {}) {
       }
 
       const data = hbRes.data || {};
+      if (Array.isArray(data.tcpProbeTargets) && data.tcpProbeTargets.length) {
+        currentTcpProbeTargets = data.tcpProbeTargets;
+      }
       if (data.standbyMasterUrl && data.standbyMasterUrl !== cfg.standbyMaster) {
         cfg.standbyMaster = String(data.standbyMasterUrl).trim();
       }
@@ -1377,7 +1381,7 @@ if (require.main === module) {
     console.log(`[NexusGate-Agent v${AGENT_VERSION}] Listening on 0.0.0.0:${cfg.port} (Node: ${cfg.nodeId}, 1s Real-Time Poller & Limit Enforcer Active)`);
     sendHeartbeat();
     // Run 3-carrier TCP connectivity probe (Shenzhen CT / Guangdong CU / Guangdong CM) every 60s (< 0.5 KB/min)
-    setTimeout(() => { runThreeCarrierTcpProbe().catch(() => {}); }, 3000).unref();
+    setTimeout(() => { runThreeCarrierTcpProbe().then(() => sendHeartbeat({ skipClashPoll: true })).catch(() => {}); }, 1200).unref();
     setInterval(() => { runThreeCarrierTcpProbe().catch(() => {}); }, 60000).unref();
     // Poll local Sing-box Clash API & kernel sockets every 1s for sub-second connection capture & real-time IP/device limit enforcement
     setInterval(() => { pollLocalClashTraffic().catch(() => {}); }, 1000).unref();
