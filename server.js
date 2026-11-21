@@ -56,6 +56,7 @@ const {
   syncExitNodeOutbounds,
   compileNodeSingboxConfig,
   pushConfigToAgentNode,
+  probeOutboundFromRelayNode,
   syncChangedClusterNodes,
   handleAgentHeartbeat,
   buildAgentInstallCommand
@@ -84,7 +85,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.19';
+const VERSION = '1.0.20';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -2012,6 +2013,31 @@ async function handleRequest(req, res) {
       });
       autoApplyIfEnabled();
       return sendJson(res, 200, { ok: true });
+    }
+
+    const inbProbeRelayMatch = route('/api/inbounds/:id/probe-relay', pathname);
+    if (inbProbeRelayMatch && method === 'POST') {
+      const inbound = (store.state.inbounds || []).find((i) => i.id === inbProbeRelayMatch.id);
+      if (!inbound) return sendError(res, 404, '未找到入站节点');
+      const relayNodeId = inbound.nodeId || 'node_local';
+      const relayNode = (store.state.nodes || []).find((n) => n.id === relayNodeId);
+      const targetTag = (inbound.outboundTag && inbound.outboundTag !== 'default')
+        ? inbound.outboundTag
+        : (store.state.routing?.final || 'direct');
+      const targetOut = (store.state.outbounds || []).find((o) => o.tag === targetTag);
+      const probeRes = await probeOutboundFromRelayNode(store.state, relayNodeId, {
+        outboundTag: targetTag,
+        server: targetOut?.server || '',
+        port: targetOut?.port || 0
+      });
+      return sendJson(res, 200, {
+        ...probeRes,
+        inboundId: inbound.id,
+        relayNodeId,
+        relayNodeName: relayNode?.name || '主控本机',
+        outboundTag: targetTag,
+        outboundRemark: targetOut?.remark || targetTag
+      });
     }
 
     const inbOutboundMatch = route('/api/inbounds/:id/outbound', pathname);

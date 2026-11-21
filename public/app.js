@@ -37,6 +37,7 @@ const state = {
   inbounds: [],
   outbounds: [],
   outboundPings: {},
+  inboundRelayPings: {},
   routing: { final: 'direct', rules: [], ruleSets: [] },
   dns: { strategy: 'prefer_ipv4' },
   certificates: [],
@@ -529,7 +530,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.19 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.20 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -597,7 +598,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.19</span>
+          <span class="tag">NexusGate Plus v1.0.20</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -1255,14 +1256,32 @@ function renderInbounds() {
         <td><strong>:${esc(item.port)}</strong></td>
         <td>
           <div style="display:flex;flex-direction:column;gap:4px">
-            <div>${relayHtml}</div>
+            <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
+              ${relayHtml}
+              ${(() => {
+                const rp = state.inboundRelayPings[item.id];
+                if (!rp) return '';
+                if (rp.pending) return '<span class="tag" style="font-size:11px">⏳ 实测中...</span>';
+                if (rp.ok) {
+                  const clr = rp.delayMs < 150 ? 'var(--success)' : (rp.delayMs < 380 ? 'var(--warning)' : 'var(--danger)');
+                  const bg = rp.delayMs < 150 ? 'var(--success-soft)' : (rp.delayMs < 380 ? 'var(--warning-soft)' : 'var(--danger-soft)');
+                  const modeTxt = rp.mode === 'real' ? '真连' : 'TCP';
+                  return `<span class="tag" style="font-size:11px;color:${clr};background:${bg};font-weight:750" title="从中转机 [${esc(rp.relayNodeName || '')}] 到落地的真实延迟">● ${rp.delayMs} ms (${modeTxt})</span>`;
+                }
+                const shortErr = rp.mode === 'real_failed_tcp_ok' ? `✕ 握手失败 (TCP ${rp.tcpMs}ms)` : '✕ 不通';
+                return `<span class="tag" style="font-size:11px;color:var(--danger);background:var(--danger-soft);font-weight:750" title="${esc(rp.error || '连接失败')}">${shortErr}</span>`;
+              })()}
+            </div>
             ${item.protocol !== 'direct' ? `
-              <select class="inline-outbound-select" data-action="inline-outbound-select" data-id="${esc(item.id)}" title="一键切换该节点转发的目标落地出站">
-                <option value="default"${selected('default', item.outboundTag || 'default')}>默认全局路由 (${esc(state.routing?.final || 'direct')})</option>
-                <option value="direct"${selected('direct', item.outboundTag)}>direct (本地直连)</option>
-                ${customOutboundOptCache.map((o) => (o.tag === item.outboundTag ? o.html.replace('<option ', '<option selected ') : o.html)).join('')}
-                <option value="block"${selected('block', item.outboundTag)}>block (黑洞拦截)</option>
-              </select>
+              <div style="display:flex;align-items:center;gap:5px">
+                <select class="inline-outbound-select" data-action="inline-outbound-select" data-id="${esc(item.id)}" title="一键切换该节点转发的目标落地出站">
+                  <option value="default"${selected('default', item.outboundTag || 'default')}>默认全局路由 (${esc(state.routing?.final || 'direct')})</option>
+                  <option value="direct"${selected('direct', item.outboundTag)}>direct (本地直连)</option>
+                  ${customOutboundOptCache.map((o) => (o.tag === item.outboundTag ? o.html.replace('<option ', '<option selected ') : o.html)).join('')}
+                  <option value="block"${selected('block', item.outboundTag)}>block (黑洞拦截)</option>
+                </select>
+                <button class="relay-probe-btn" data-action="probe-inbound-relay" data-id="${esc(item.id)}" title="按需从当前所属中转机实测到该目标落地出站的真连接延迟（不点0消耗）" ${state.inboundRelayPings[item.id]?.pending ? 'disabled' : ''}>⚡ 测延迟</button>
+              </div>
             ` : ''}
           </div>
         </td>
@@ -5440,6 +5459,28 @@ document.addEventListener('click', async (e) => {
       await api(`/api/outbounds/${actEl.dataset.id}/reset-traffic`, { method: 'POST' });
       toast('出站流量统计已清零');
       load('outbounds');
+    }
+    else if (action === 'probe-inbound-relay') {
+      const id = actEl.dataset.id;
+      if (!id) return;
+      state.inboundRelayPings[id] = { pending: true };
+      render();
+      try {
+        const res = await api(`/api/inbounds/${encodeURIComponent(id)}/probe-relay`, { method: 'POST' });
+        state.inboundRelayPings[id] = res;
+        render();
+        const rName = (res.relayNodeName || '中转机').replace(/\s*\(Local Master\)/, '');
+        const oName = res.outboundRemark || res.outboundTag || '直连';
+        if (res.ok) {
+          toast(`✅ [${rName}] ➔ [${oName}] ${res.mode === 'real' ? '真连接' : 'TCP'}延迟: ${res.delayMs} ms`);
+        } else {
+          toast(`❌ [${rName}] ➔ [${oName}] ${res.error || '不通'}`, true);
+        }
+      } catch (err) {
+        state.inboundRelayPings[id] = { ok: false, error: err.message };
+        render();
+        toast(err.message, true);
+      }
     }
     else if (action === 'ping-outbound') {
       const id = actEl.dataset.id;

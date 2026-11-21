@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.19)
+ * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.20)
  * Zero external npm dependencies · < 15 MB RAM footprint
  * Supports Relay Node, Exit Node (SS/SS2022/VMess), and Hot-Standby Failover Node.
  * Features:
@@ -27,7 +27,7 @@ const https = require('node:https');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 
-const AGENT_VERSION = '1.0.19';
+const AGENT_VERSION = '1.0.20';
 const ACTIVE_LEASE_TTL_MS = 60000;
 const EXCESS_IP_BLOCK_TTL_MS = 60000;
 
@@ -1158,6 +1158,102 @@ async function sendHeartbeat(customOpts = {}) {
   }
 }
 
+
+function probeTcpConnect(host, port, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const cleanHost = String(host || "").trim();
+    const numPort = Number(port || 0);
+    if (!cleanHost || !numPort) return resolve({ ok: false, error: "缺少目标地址或端口" });
+    const start = Date.now();
+    let settled = false;
+    const done = (res) => {
+      if (settled) return;
+      settled = true;
+      try { sock.destroy(); } catch { /* ignore */ }
+      resolve(res);
+    };
+    const sock = net.createConnection({ host: cleanHost, port: numPort });
+    sock.setTimeout(timeoutMs);
+    sock.on("connect", () => done({ ok: true, tcpMs: Math.max(1, Date.now() - start) }));
+    sock.on("timeout", () => done({ ok: false, error: "TCP连接超时" }));
+    sock.on("error", (err) => done({ ok: false, error: err.code || err.message || "TCP连接被拒" }));
+  });
+}
+
+function probeClashProxyDelay(outboundTag, timeoutMs = 5000, customCfg = cfg) {
+  return new Promise((resolve) => {
+    const clashPort = Number(customCfg.clashPort || cfg.clashPort || 10086);
+    const clashSecret = customCfg.clashSecret !== undefined ? customCfg.clashSecret : cfg.clashSecret;
+    const probeUrl = encodeURIComponent("https://www.gstatic.com/generate_204");
+    const pathStr = `/proxies/${encodeURIComponent(outboundTag)}/delay?timeout=${Math.max(1000, Math.min(10000, Number(timeoutMs) || 5000))}&url=${probeUrl}`;
+    const req = http.request({
+      hostname: "127.0.0.1",
+      port: clashPort,
+      path: pathStr,
+      method: "GET",
+      headers: clashSecret ? { Authorization: `Bearer ${clashSecret}` } : {},
+      timeout: Math.max(2000, (Number(timeoutMs) || 5000) + 1200)
+    }, (res) => {
+      let raw = "";
+      res.on("data", (c) => { raw += c; });
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(raw || "{}");
+          if (res.statusCode >= 200 && res.statusCode < 300 && Number(data.delay) > 0) {
+            return resolve({ ok: true, delayMs: Math.round(Number(data.delay)) });
+          }
+          return resolve({ ok: false, statusCode: res.statusCode, error: data.message || `HTTP ${res.statusCode}` });
+        } catch {
+          return resolve({ ok: false, statusCode: res.statusCode, error: `HTTP ${res.statusCode}` });
+        }
+      });
+    });
+    req.on("timeout", () => { req.destroy(); resolve({ ok: false, error: "真连接测速超时" }); });
+    req.on("error", (err) => resolve({ ok: false, error: err.code || err.message || "本地内核API不可达" }));
+    req.end();
+  });
+}
+
+async function handleProbeOutbound(payload = {}, customCfg = cfg) {
+  const outboundTag = String(payload.outboundTag || "direct").trim();
+  const server = String(payload.server || "").trim();
+  const port = Number(payload.port || 0);
+  const timeoutMs = Math.max(1500, Math.min(8000, Number(payload.timeoutMs || 5000)));
+  if (outboundTag === "block") {
+    return { ok: false, mode: "blocked", error: "当前出站为 block (黑洞拦截)" };
+  }
+  const realRes = await probeClashProxyDelay(outboundTag, timeoutMs, customCfg);
+  if (realRes.ok) {
+    return { ok: true, mode: "real", delayMs: realRes.delayMs, outboundTag };
+  }
+  // If real proxy test failed, run a lightweight TCP connect from this Relay to Exit server:port for exact diagnostics
+  if (server && port > 0) {
+    const tcpRes = await probeTcpConnect(server, port, Math.min(3000, timeoutMs));
+    if (tcpRes.ok) {
+      return {
+        ok: false,
+        mode: "real_failed_tcp_ok",
+        tcpMs: tcpRes.tcpMs,
+        outboundTag,
+        error: `中转机到落地 TCP 握手通 (${tcpRes.tcpMs}ms)，但代理真连接失败 (${realRes.error || "请检查落地密码/协议/端口"})`
+      };
+    }
+    return {
+      ok: false,
+      mode: "unreachable",
+      outboundTag,
+      error: `中转机无法直连落地 ${server}:${port} (${tcpRes.error || "超时或被拒"})`
+    };
+  }
+  if (outboundTag === "direct") {
+    const directTcp = await probeTcpConnect("1.1.1.1", 443, 3000);
+    if (directTcp.ok) {
+      return { ok: true, mode: "tcp", delayMs: directTcp.tcpMs, outboundTag };
+    }
+  }
+  return { ok: false, mode: "real_failed", outboundTag, error: realRes.error || "真连接测速失败" };
+}
+
 function createAgentHttpServer(customCfg = cfg) {
   return http.createServer((req, res) => {
     const sendJson = (code, obj) => {
@@ -1207,6 +1303,15 @@ function createAgentHttpServer(customCfg = cfg) {
         } catch (err) {
           return sendJson(400, { error: err.message });
         }
+      }
+
+      if (req.url === '/agent/v1/probe-outbound' && req.method === 'POST') {
+        let payload = {};
+        try { payload = JSON.parse(rawBody || '{}'); } catch { return sendJson(400, { ok: false, error: 'Invalid JSON' }); }
+        handleProbeOutbound(payload, customCfg)
+          .then((result) => sendJson(200, result))
+          .catch((err) => sendJson(500, { ok: false, error: err.message }));
+        return;
       }
 
       if (req.url === '/agent/v1/status' && req.method === 'GET') {
@@ -1268,5 +1373,8 @@ module.exports = {
   collectNodeMetrics,
   pollLocalClashTraffic,
   sendHeartbeat,
+  probeTcpConnect,
+  probeClashProxyDelay,
+  handleProbeOutbound,
   createAgentHttpServer
 };

@@ -4008,7 +4008,7 @@ test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Mas
 
     const jsRes = await req(`${prefix}/api/cluster/nexus-agent.js`);
     assert.equal(jsRes.status, 200);
-    assert.ok(jsRes.text.includes('1.0.19'), 'nexus-agent.js must be v1.0.19');
+    assert.ok(jsRes.text.includes('1.0.20'), 'nexus-agent.js must be v1.0.20');
   }
 
   // 2. Issue a valid Let's Encrypt-like CA cert for Master Panel (zz.vponlive.com) and bind it to Master Panel
@@ -4759,4 +4759,141 @@ test('39. v1.0.19 Hybrid Node Clean Default (Zero Auto-SS Inbounds/Outbounds), P
   const renderMs = Date.now() - t0;
   assert.ok(html128.length > 50000);
   assert.ok(renderMs < 100, `128-inbound x 80-outbound render must be fast (< 100ms, got ${renderMs}ms)`);
+});
+
+
+test('40. v1.0.20 On-Demand Relay -> Exit Real Latency Probe E2E (POST /api/inbounds/:id/probe-relay -> Remote Agent -> Clash API /proxies/:tag/delay + TCP Diagnostic Fallback)', async () => {
+  const httpMod = require('node:http');
+  const netMod = require('node:net');
+  const { createAgentHttpServer } = require('../agent/nexus-agent');
+
+  // 1. Spin up a mock Exit TCP server (simulating a reachable Exit IP:Port)
+  const mockExitTcp = netMod.createServer((sock) => { sock.end(); });
+  await new Promise((r) => mockExitTcp.listen(0, '127.0.0.1', r));
+  const mockExitPort = mockExitTcp.address().port;
+
+  // 2. Spin up a mock Relay Clash API server that handles /proxies/:tag/delay
+  let mockClashBehavior = 'ok';
+  const mockClashApi = httpMod.createServer((reqObj, resObj) => {
+    if (reqObj.url.startsWith('/proxies/') && reqObj.url.includes('/delay')) {
+      if (mockClashBehavior === 'ok') {
+        resObj.writeHead(200, { 'Content-Type': 'application/json' });
+        return resObj.end(JSON.stringify({ delay: 28 }));
+      }
+      resObj.writeHead(503, { 'Content-Type': 'application/json' });
+      return resObj.end(JSON.stringify({ message: 'invalid credentials' }));
+    }
+    resObj.writeHead(404);
+    resObj.end('{}');
+  });
+  await new Promise((r) => mockClashApi.listen(0, '127.0.0.1', r));
+  const mockClashPort = mockClashApi.address().port;
+
+  // 3. Spin up a REAL NexusGate Agent HTTP server on a dynamic port
+  const agentToken = 'ag_probe_test_token_v1020';
+  const agentServer = createAgentHttpServer({
+    nodeId: 'node_probe_relay',
+    token: agentToken,
+    clashPort: mockClashPort,
+    clashSecret: ''
+  });
+  await new Promise((r) => agentServer.listen(0, '127.0.0.1', r));
+  const agentPort = agentServer.address().port;
+
+  try {
+    // Register this Relay node in Master Panel pointing to our real local Agent server
+    const relayRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'vm主力-probe',
+        role: 'relay',
+        host: '127.0.0.1',
+        agentPort,
+        domain: 'vm.362353.xyz'
+      })
+    });
+    assert.equal(relayRes.status, 201);
+    const relayNode = relayRes.json.node;
+
+    // Align stored token with our Agent server token
+    store.transact((st) => {
+      const n = st.nodes.find((x) => x.id === relayNode.id);
+      if (n) n.token = agentToken;
+    });
+
+    // Create two outbounds: one reachable TCP Exit, one unreachable port
+    const outGoodRes = await req('/SecPath16Chars99/api/outbounds', {
+      method: 'POST',
+      body: JSON.stringify({
+        tag: 'ntt-exit-good',
+        remark: 'NTT三刀年付',
+        type: 'shadowsocks',
+        server: '127.0.0.1',
+        port: mockExitPort,
+        method: 'aes-128-gcm',
+        password: 'TestPass123'
+      })
+    });
+    assert.equal(outGoodRes.status, 201);
+
+    const outBadRes = await req('/SecPath16Chars99/api/outbounds', {
+      method: 'POST',
+      body: JSON.stringify({
+        tag: 'exit-dead-port',
+        remark: '已挂落地',
+        type: 'shadowsocks',
+        server: '127.0.0.1',
+        port: 1,
+        method: 'aes-128-gcm',
+        password: 'TestPass123'
+      })
+    });
+    assert.equal(outBadRes.status, 201);
+
+    // Create an inbound on vm主力-probe bound to ntt-exit-good
+    const inbRes = await req('/SecPath16Chars99/api/inbounds', {
+      method: 'POST',
+      body: JSON.stringify({
+        nodeId: relayNode.id,
+        remark: 'US-NTT-Probe',
+        protocol: 'vless',
+        port: 47906,
+        security: 'reality',
+        outboundTag: 'ntt-exit-good'
+      })
+    });
+    assert.equal(inbRes.status, 201);
+    const inbId = inbRes.json.inbound.id;
+
+    // Case 1: Real proxy delay succeeds through Relay Clash API -> 28 ms (real)
+    mockClashBehavior = 'ok';
+    const p1 = await req(`/SecPath16Chars99/api/inbounds/${inbId}/probe-relay`, { method: 'POST' });
+    assert.equal(p1.status, 200);
+    assert.equal(p1.json.ok, true);
+    assert.equal(p1.json.mode, 'real');
+    assert.equal(p1.json.delayMs, 28);
+    assert.equal(p1.json.relayNodeName, 'vm主力-probe');
+
+    // Case 2: Proxy auth/handshake fails, but Relay -> Exit TCP is reachable -> real_failed_tcp_ok
+    mockClashBehavior = 'fail';
+    const p2 = await req(`/SecPath16Chars99/api/inbounds/${inbId}/probe-relay`, { method: 'POST' });
+    assert.equal(p2.status, 200);
+    assert.equal(p2.json.ok, false);
+    assert.equal(p2.json.mode, 'real_failed_tcp_ok');
+    assert.ok(p2.json.tcpMs >= 1, 'Must report Relay -> Exit TCP handshake latency for diagnostics');
+
+    // Case 3: Switch inbound to dead exit -> completely unreachable
+    await req(`/SecPath16Chars99/api/inbounds/${inbId}/outbound`, {
+      method: 'POST',
+      body: JSON.stringify({ outboundTag: 'exit-dead-port' })
+    });
+    const p3 = await req(`/SecPath16Chars99/api/inbounds/${inbId}/probe-relay`, { method: 'POST' });
+    assert.equal(p3.status, 200);
+    assert.equal(p3.json.ok, false);
+    assert.equal(p3.json.mode, 'unreachable');
+  } finally {
+    await new Promise((r) => agentServer.close(r));
+    await new Promise((r) => mockClashApi.close(r));
+    await new Promise((r) => mockExitTcp.close(r));
+  }
 });
