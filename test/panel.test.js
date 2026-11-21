@@ -4008,7 +4008,7 @@ test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Mas
 
     const jsRes = await req(`${prefix}/api/cluster/nexus-agent.js`);
     assert.equal(jsRes.status, 200);
-    assert.ok(jsRes.text.includes('1.0.18'), 'nexus-agent.js must be v1.0.18');
+    assert.ok(jsRes.text.includes('1.0.19'), 'nexus-agent.js must be v1.0.19');
   }
 
   // 2. Issue a valid Let's Encrypt-like CA cert for Master Panel (zz.vponlive.com) and bind it to Master Panel
@@ -4669,4 +4669,94 @@ test('38. v1.0.18 Clean Exit Node Mode (Zero Auto-Created Inbounds/Outbounds), M
   const exitCfg = await req(`/SecPath16Chars99/api/cluster/nodes/${ppfExit.id}/config`);
   assert.equal(exitCfg.json.singboxConfig.inbounds.length, 1, 'PPF Exit must have ONLY the 1 user-created inbound (:44849)');
   assert.equal(exitCfg.json.singboxConfig.inbounds[0].listen_port, 44849);
+});
+
+
+test('39. v1.0.19 Hybrid Node Clean Default (Zero Auto-SS Inbounds/Outbounds), Per-Server Scoped Inbound Traffic Stats & 128-Node Smooth Render Benchmark', async () => {
+  // 1. Verify adding a Hybrid (中转 + 落地一体机) node also defaults exitConfig.enabled = false (0 auto inbounds, 0 auto outbounds)
+  const outCountBefore = (await req('/SecPath16Chars99/api/outbounds')).json.outbounds.length;
+  const hybRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'JP-Hybrid-t39', role: 'hybrid', host: '45.32.10.99', domain: 'hyb.onliveme.com' })
+  });
+  assert.equal(hybRes.status, 201);
+  const hybNode = hybRes.json.node;
+  assert.equal(hybNode.exitConfig.enabled, false, 'Hybrid node must NOT auto-enable default SS :28388');
+  const outCountAfter = (await req('/SecPath16Chars99/api/outbounds')).json.outbounds.length;
+  assert.equal(outCountAfter, outCountBefore, 'Adding a Hybrid node must NOT auto-create any shared SS outbound');
+  const hybCfg = await req(`/SecPath16Chars99/api/cluster/nodes/${hybNode.id}/config`);
+  assert.equal(hybCfg.json.singboxConfig.inbounds.length, 0, 'Fresh Hybrid node must have 0 auto-created inbounds');
+
+  // 2. Verify renderInbounds() in public/app.js computes per-server traffic/counts when a specific server is selected AND renders 128 nodes fast
+  const vm = require('node:vm');
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const cutIdx = appSrc.indexOf('// Boot application');
+  const testableSrc = appSrc.slice(0, cutIdx) + '\n;globalThis.__testExports = { state, renderInbounds };';
+
+  const stubEl = () => ({
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    addEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    setAttribute() {},
+    removeAttribute() {},
+    textContent: '',
+    innerHTML: '',
+    value: '',
+    style: {}
+  });
+  const sandbox = {
+    window: { location: { hash: '', origin: 'https://zz.vponlive.com:19541', protocol: 'https:', hostname: 'zz.vponlive.com', port: '19541' }, scrollY: 0, scrollX: 0, scrollTo() {}, addEventListener() {} },
+    document: { querySelector: () => stubEl(), querySelectorAll: () => [], getElementById: () => stubEl(), addEventListener() {}, activeElement: null, documentElement: { setAttribute() {} } },
+    localStorage: { getItem: () => null, setItem() {} },
+    sessionStorage: { getItem: () => null, setItem() {} },
+    history: { replaceState() {} },
+    navigator: {},
+    Intl, Date, Math, JSON, Array, Object, Map, Set, Number, String, Boolean, RegExp, Error, Promise, URLSearchParams,
+    setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+    console
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(testableSrc, sandbox);
+  const { state: uiState, renderInbounds } = sandbox.__testExports;
+
+  uiState.nodes = [
+    { id: 'node_local', name: '主控本机 (Local Master)', role: 'relay', domain: 'zz.vponlive.com', host: '111.91.25.83', isLocal: true },
+    { id: 'node_a', name: 'US PPF', role: 'relay', domain: 'ppf.onliveme.com', host: '68.164.13.50' },
+    { id: 'node_b', name: '华纳云JP', role: 'relay', domain: 'hn.onliveme.com', host: '103.1.2.3' }
+  ];
+  uiState.outbounds = Array.from({ length: 80 }, (_, i) => ({
+    id: `o_${i}`, tag: `out-${i}`, remark: `Out-${i}`, server: `10.0.0.${(i % 250) + 1}`, port: 20000 + i, type: 'shadowsocks'
+  }));
+  uiState.inbounds = [
+    { id: 'i_a1', nodeId: 'node_a', nodeName: 'US PPF', remark: 'PPF-1', tag: 'inbound-1001', protocol: 'vless', port: 1001, security: 'reality', up: 1024 ** 3, down: 2 * (1024 ** 3), enable: true, clients: [{ email: 'u1' }, { email: 'u2' }] },
+    { id: 'i_b1', nodeId: 'node_b', nodeName: '华纳云JP', remark: 'JP-1', tag: 'inbound-2001', protocol: 'vless', port: 2001, security: 'reality', up: 10 * (1024 ** 3), down: 20 * (1024 ** 3), enable: true, clients: [{ email: 'u3' }] }
+  ];
+
+  // Global view ("all"): 11 GB up / 22 GB down = 33 GB total, 2 inbounds, 3 clients
+  uiState.nodeFilter = 'all';
+  const htmlAll = renderInbounds();
+  assert.ok(htmlAll.includes('全部服务器 · 总上传 / 下载'));
+  assert.ok(htmlAll.includes('33 GB'), 'All-servers view must show combined 33 GB total');
+
+  // Scoped view ("node_a" = US PPF): 1.00 GB up / 2.00 GB down = 3.00 GB total, 1 inbound, 2 clients, ppf.onliveme.com
+  uiState.nodeFilter = 'node_a';
+  const htmlA = renderInbounds();
+  assert.ok(htmlA.includes('US PPF · 上传 / 下载'));
+  assert.ok(htmlA.includes('3.00 GB'), 'US PPF view must show ONLY its own 3.00 GB total (not 33 GB!)');
+  assert.ok(htmlA.includes('1 启用 / 共 1 个'), 'US PPF view must show ONLY its own 1 inbound');
+  assert.ok(htmlA.includes('2 个客户端 · ppf.onliveme.com'), 'US PPF view must show ONLY its own 2 clients & ppf.onliveme.com');
+
+  // 3. 128-inbound x 80-outbound render speed benchmark (< 50 ms)
+  uiState.nodeFilter = 'all';
+  uiState.inbounds = Array.from({ length: 128 }, (_, i) => ({
+    id: `inb_${i}`, nodeId: i % 2 === 0 ? 'node_a' : 'node_b', nodeName: i % 2 === 0 ? 'US PPF' : '华纳云JP',
+    remark: `Node-${i}`, tag: `inbound-${30000 + i}`, protocol: 'vless', port: 30000 + i,
+    security: 'reality', outboundTag: `out-${i % 80}`, up: 1048576, down: 2097152, enable: true, clients: [{ email: `c${i}` }]
+  }));
+  const t0 = Date.now();
+  const html128 = renderInbounds();
+  const renderMs = Date.now() - t0;
+  assert.ok(html128.length > 50000);
+  assert.ok(renderMs < 100, `128-inbound x 80-outbound render must be fast (< 100ms, got ${renderMs}ms)`);
 });

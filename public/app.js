@@ -529,7 +529,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.18 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.19 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -597,7 +597,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.18</span>
+          <span class="tag">NexusGate Plus v1.0.19</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -1035,15 +1035,34 @@ function renderInbounds() {
   });
 
   const subAllUrl = getBaseSubscriptionUrl();
-  const totalUp = state.inbounds.reduce((acc, i) => acc + Number(i.up || 0), 0);
-  const totalDown = state.inbounds.reduce((acc, i) => acc + Number(i.down || 0), 0);
-  const activeCount = state.inbounds.filter((i) => i.enable !== false).length;
-  const totalClients = state.inbounds.reduce((acc, i) => acc + (i.clients?.length || 0), 0);
+  const scopedInbounds = nf === 'all'
+    ? state.inbounds
+    : state.inbounds.filter((i) => (i.nodeId || 'node_local') === nf);
+  const selectedNodeObj = nf !== 'all'
+    ? getClusterNodesList().find((n) => n.id === nf)
+    : null;
+  const scopeLabel = selectedNodeObj
+    ? selectedNodeObj.name.replace(/\s*\(Local Master\)/, '')
+    : '';
+  const totalUp = scopedInbounds.reduce((acc, i) => acc + Number(i.up || 0), 0);
+  const totalDown = scopedInbounds.reduce((acc, i) => acc + Number(i.down || 0), 0);
+  const activeCount = scopedInbounds.filter((i) => i.enable !== false).length;
+  const totalClients = scopedInbounds.reduce((acc, i) => acc + (i.clients?.length || 0), 0);
   const activeCert = getActiveCertObject();
   const defaultDomain = activeCert?.domain || state.defaultSettings?.defaultTlsDomain || state.settings?.webDomain || 'www.apple.com';
+  const scopeDomain = selectedNodeObj
+    ? (selectedNodeObj.domain || selectedNodeObj.host || defaultDomain)
+    : defaultDomain;
+
+  const outboundByTag = new Map((state.outbounds || []).map((o) => [o.tag, o]));
+  const customOutboundsList = (state.outbounds || []).filter((o) => !o.builtin);
+  const customOutboundOptCache = customOutboundsList.map((o) => ({
+    tag: o.tag,
+    html: `<option value="${esc(o.tag)}">⇄ ${esc(o.remark || o.tag)} (${esc(o.server)}:${esc(o.port)})</option>`
+  }));
 
   const filterDefs = [
-    ['all', `全部 (${state.inbounds.length})`],
+    ['all', `全部 (${scopedInbounds.length})`],
     ['vless', 'VLESS'],
     ['anytls', 'AnyTLS'],
     ['hysteria2', 'HY2'],
@@ -1073,7 +1092,7 @@ function renderInbounds() {
       } else if (item.outboundTag === 'block') {
         relayHtml = '<span class="status disabled">block (拦截)</span>';
       } else {
-        const targetOut = state.outbounds.find((o) => o.tag === item.outboundTag);
+        const targetOut = outboundByTag.get(item.outboundTag);
         relayHtml = `<span class="tag relay">⇄ ${esc(targetOut ? `${targetOut.tag} (${targetOut.server}:${targetOut.port})` : item.outboundTag)}</span>`;
       }
     }
@@ -1241,7 +1260,7 @@ function renderInbounds() {
               <select class="inline-outbound-select" data-action="inline-outbound-select" data-id="${esc(item.id)}" title="一键切换该节点转发的目标落地出站">
                 <option value="default"${selected('default', item.outboundTag || 'default')}>默认全局路由 (${esc(state.routing?.final || 'direct')})</option>
                 <option value="direct"${selected('direct', item.outboundTag)}>direct (本地直连)</option>
-                ${(state.outbounds || []).filter((o) => !o.builtin).map((o) => `<option value="${esc(o.tag)}"${selected(o.tag, item.outboundTag)}>⇄ ${esc(o.remark || o.tag)} (${esc(o.server)}:${esc(o.port)})</option>`).join('')}
+                ${customOutboundOptCache.map((o) => (o.tag === item.outboundTag ? o.html.replace('<option ', '<option selected ') : o.html)).join('')}
                 <option value="block"${selected('block', item.outboundTag)}>block (黑洞拦截)</option>
               </select>
             ` : ''}
@@ -1274,20 +1293,20 @@ function renderInbounds() {
   return `
     <div class="stat-strip">
       <div class="stat-strip-item">
-        <span>总上传 / 下载</span>
+        <span>${scopeLabel ? `${esc(scopeLabel)} · 上传 / 下载` : '全部服务器 · 总上传 / 下载'}</span>
         <strong>↑ ${fmtBytes(totalUp)} / ↓ ${fmtBytes(totalDown)}</strong>
       </div>
       <div class="stat-strip-item">
-        <span>总流量累计</span>
+        <span>${scopeLabel ? `${esc(scopeLabel)} · 流量累计` : '全部服务器 · 总流量累计'}</span>
         <strong>${fmtBytes(totalUp + totalDown)}</strong>
       </div>
       <div class="stat-strip-item">
-        <span>入站节点数量</span>
-        <strong>${activeCount} 启用 / 共 ${state.inbounds.length} 个</strong>
+        <span>${scopeLabel ? `${esc(scopeLabel)} · 入站节点数` : '全部服务器 · 入站节点数'}</span>
+        <strong>${activeCount} 启用 / 共 ${scopedInbounds.length} 个</strong>
       </div>
       <div class="stat-strip-item">
-        <span>客户端与默认证书域名</span>
-        <strong>${totalClients} 个客户端 · ${esc(defaultDomain)}</strong>
+        <span>${scopeLabel ? `${esc(scopeLabel)} · 客户端与域名` : '客户端与默认证书域名'}</span>
+        <strong>${totalClients} 个客户端 · ${esc(scopeDomain)}</strong>
       </div>
     </div>
 
@@ -2988,7 +3007,10 @@ function render() {
     contentEl.style.minHeight = `${prevHeight}px`;
   }
 
-  contentEl.innerHTML = (views[state.page] || renderOverview)();
+  const nextHtml = (views[state.page] || renderOverview)();
+  if (contentEl._lastRenderedHtml === nextHtml) return;
+  contentEl._lastRenderedHtml = nextHtml;
+  contentEl.innerHTML = nextHtml;
 
   const nextTables = contentEl.querySelectorAll('.table-wrap');
   nextTables.forEach((el, idx) => {
@@ -4401,7 +4423,7 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
 
   openModal(
     existing ? '编辑集群服务器节点' : '添加集群服务器 (中转机 / 落地机 / 热备容灾机)',
-    existing ? n.name : '一主控统管：中转机绑定独立域名，落地机免域名自动开启 SS 加入全局共享池',
+    existing ? n.name : '一主控统管：中转机绑定独立域名，纯落地机与一体机默认不自动建节点/出站（支持手动建节点与内网/公网 IP）',
     `
     <form id="cluster-node-form" class="form-grid" data-id="${esc(existing?.id || '')}" autocomplete="off">
       <div class="wide" style="padding:10px 13px;border-radius:10px;background:var(--surface-soft);border:1px solid var(--line);font-size:12.5px;line-height:1.6">
@@ -4416,7 +4438,7 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
         <select name="role" id="cluster-role-select">
           <option value="relay"${selected('relay', n.role)}>中转入口机 (Relay · 绑定各自独立域名承载客户)</option>
           <option value="exit"${selected('exit', n.role)}>纯落地机 (Exit · 免域名纯IP，不自动建节点，支持手动建节点与内网/公网出站)</option>
-          <option value="hybrid"${selected('hybrid', n.role)}>中转 + 落地一体机 (Hybrid · 兼具入口与共享SS落地)</option>
+          <option value="hybrid"${selected('hybrid', n.role)}>中转 + 落地一体机 (Hybrid · 不自动建节点/出站，手动自由配置)</option>
           <option value="standby"${selected('standby', n.role)}>热备容灾机 (Standby · 主力中转故障时秒级接管)</option>
         </select>
       </label>
@@ -4439,12 +4461,13 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
       <div id="cluster-exit-ss-wrap" class="form-grid wide" style="margin:0;${showExitSection ? '' : 'display:none'}">
         <div class="section-title">落地机节点与可选共享 SS 配置 (默认不自动创建节点与出站)</div>
         <div class="wide" style="padding:10px 12px;border-radius:9px;background:var(--primary-soft);color:var(--primary);font-size:12px;line-height:1.55">
-          <b>推荐模式（默认）</b>：添加落地机并安装 Agent 后，系统<b>不会</b>自动创建任何默认节点或自动生成出站，避免覆盖您自定义的内网 IP（如 <code>10.240.28.3</code>）。请直接在<b>【入站节点管理】</b>选择该落地机自行创建节点，再到<b>【出站规则】</b>手动添加对应公网或内网 IP 出站即可。
+          <b>推荐模式（默认）</b>：添加纯落地机或中转+落地一体机并安装 Agent 后，系统<b>均不会</b>自动创建任何默认节点或自动生成出站，避免覆盖您自定义的内网 IP（如 <code>10.240.28.3</code>）。请直接在<b>【入站节点管理】</b>选择该落地机自行创建节点，再到<b>【出站规则】</b>手动添加对应公网或内网 IP 出站即可。
         </div>
         <label class="wide" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
           <input type="checkbox" name="enableAutoExitSs" id="enable-auto-exit-ss-chk" ${n.exitConfig?.enabled === true ? 'checked' : ''} style="width:auto">
           <span>同时自动开启快捷共享 SS 端口（默认关闭，仅需自动注册全局共享 SS 池时勾选）</span>
         </label>
+        <div id="auto-exit-ss-fields" class="form-grid wide" style="margin:0;${n.exitConfig?.enabled === true ? '' : 'display:none'}">
         <label>
           落地 Shadowsocks 监听端口
           <input name="exitPort" type="number" value="${esc(n.exitConfig?.port || 28388)}" placeholder="28388" autocomplete="off">
@@ -4463,6 +4486,7 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
           落地 Shadowsocks 密码 (选填，留空自动生成高强度密钥)
           <input name="exitPassword" value="${esc(n.exitConfig?.password || '')}" placeholder="留空自动生成标准高强度 SS 密钥" autocomplete="off">
         </label>
+        </div>
         <label>
           绑定备用容错落地机 (当本落地机故障时，自动将所有中转流量无缝切至备用落地机)
           <select name="fallbackExitNodeId">
@@ -4547,6 +4571,13 @@ function openClusterNodeModal(existing = null, defaultRole = 'relay') {
     }
   };
 
+  const autoExitChk = document.getElementById('enable-auto-exit-ss-chk');
+  const autoExitFields = document.getElementById('auto-exit-ss-fields');
+  if (autoExitChk && autoExitFields) {
+    autoExitChk.addEventListener('change', () => {
+      autoExitFields.style.display = autoExitChk.checked ? '' : 'none';
+    });
+  }
   if (roleSel) {
     roleSel.addEventListener('change', syncRoleVisibility);
     syncRoleVisibility();

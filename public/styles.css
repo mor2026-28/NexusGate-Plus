@@ -562,3 +562,16 @@ dialog::backdrop { background: rgba(15, 23, 42, .48); backdrop-filter: blur(4px)
   .dialog-shell > div { padding: 12px 14px 16px; max-height: calc(92dvh - 64px); }
   .node-filter-bar, .quick-bar, .action-bar { padding: 8px 10px; gap: 6px; }
 }
+
+
+/* v1.0.19 Performance & Mobile Touch Smoothness */
+.table-wrap { -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+tbody tr { content-visibility: auto; contain-intrinsic-size: auto 72px; }
+.node-card { content-visibility: auto; contain-intrinsic-size: auto 240px; }
+@media(max-width:640px) {
+  input, select, textarea { font-size: 16px !important; }
+  button, .pill { min-height: 36px; touch-action: manipulation; }
+  .node-filter-bar { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .node-filter-bar::-webkit-scrollbar { display: none; }
+  .node-filter-bar .pill { flex: 0 0 auto; white-space: nowrap; }
+}
