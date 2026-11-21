@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.20)
+ * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.21)
  * Zero external npm dependencies · < 15 MB RAM footprint
  * Supports Relay Node, Exit Node (SS/SS2022/VMess), and Hot-Standby Failover Node.
  * Features:
@@ -27,7 +27,7 @@ const https = require('node:https');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 
-const AGENT_VERSION = '1.0.20';
+const AGENT_VERSION = '1.0.21';
 const ACTIVE_LEASE_TTL_MS = 60000;
 const EXCESS_IP_BLOCK_TTL_MS = 60000;
 
@@ -1214,6 +1214,38 @@ function probeClashProxyDelay(outboundTag, timeoutMs = 5000, customCfg = cfg) {
   });
 }
 
+
+const DEFAULT_TCP_PROBE_TARGETS = [
+  { name: "深圳电信", host: "gd-shenzhen-ct-v4.ip.zstaticcdn.com", port: 443 },
+  { name: "广东联通", host: "gd-cu-v4.ip.zstaticcdn.com", port: 80 },
+  { name: "广东移动", host: "gd-cm-v4.ip.zstaticcdn.com", port: 80 }
+];
+let currentTcpProbeTargets = DEFAULT_TCP_PROBE_TARGETS;
+let latestTcpProbe = null;
+
+async function runThreeCarrierTcpProbe(targets = currentTcpProbeTargets, timeoutMs = 4000) {
+  const list = Array.isArray(targets) && targets.length ? targets : DEFAULT_TCP_PROBE_TARGETS;
+  const results = await Promise.all(list.map(async (t) => {
+    const r = await probeTcpConnect(t.host, Number(t.port || 80), timeoutMs);
+    return {
+      name: String(t.name || t.host),
+      host: String(t.host),
+      port: Number(t.port || 80),
+      ok: Boolean(r.ok),
+      ms: r.ok ? r.tcpMs : -1,
+      ...(r.ok ? {} : { error: r.error || "断流" })
+    };
+  }));
+  const blockedCount = results.filter((x) => !x.ok).length;
+  latestTcpProbe = {
+    at: new Date().toISOString(),
+    results,
+    blockedCount,
+    allBlocked: results.length > 0 && blockedCount === results.length
+  };
+  return latestTcpProbe;
+}
+
 async function handleProbeOutbound(payload = {}, customCfg = cfg) {
   const outboundTag = String(payload.outboundTag || "direct").trim();
   const server = String(payload.server || "").trim();
@@ -1274,6 +1306,7 @@ function createAgentHttpServer(customCfg = cfg) {
         standbyMaster: customCfg.standbyMaster || cfg.standbyMaster || '',
         lastMasterContactAt,
         inboundOnline: latestInboundOnline,
+    ...(latestTcpProbe ? { tcpProbe: latestTcpProbe } : {}),
         metrics: collectNodeMetrics(customCfg)
       });
     }
@@ -1343,6 +1376,9 @@ if (require.main === module) {
   server.listen(cfg.port, '0.0.0.0', () => {
     console.log(`[NexusGate-Agent v${AGENT_VERSION}] Listening on 0.0.0.0:${cfg.port} (Node: ${cfg.nodeId}, 1s Real-Time Poller & Limit Enforcer Active)`);
     sendHeartbeat();
+    // Run 3-carrier TCP connectivity probe (Shenzhen CT / Guangdong CU / Guangdong CM) every 60s (< 0.5 KB/min)
+    setTimeout(() => { runThreeCarrierTcpProbe().catch(() => {}); }, 3000).unref();
+    setInterval(() => { runThreeCarrierTcpProbe().catch(() => {}); }, 60000).unref();
     // Poll local Sing-box Clash API & kernel sockets every 1s for sub-second connection capture & real-time IP/device limit enforcement
     setInterval(() => { pollLocalClashTraffic().catch(() => {}); }, 1000).unref();
     // Periodic heartbeat every 5s (plus instant event-driven heartbeat on online state change)
@@ -1375,6 +1411,8 @@ module.exports = {
   sendHeartbeat,
   probeTcpConnect,
   probeClashProxyDelay,
+  DEFAULT_TCP_PROBE_TARGETS,
+  runThreeCarrierTcpProbe,
   handleProbeOutbound,
   createAgentHttpServer
 };

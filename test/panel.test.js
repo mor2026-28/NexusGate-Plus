@@ -4008,7 +4008,7 @@ test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Mas
 
     const jsRes = await req(`${prefix}/api/cluster/nexus-agent.js`);
     assert.equal(jsRes.status, 200);
-    assert.ok(jsRes.text.includes('1.0.20'), 'nexus-agent.js must be v1.0.20');
+    assert.ok(jsRes.text.includes('1.0.21'), 'nexus-agent.js must be v1.0.21');
   }
 
   // 2. Issue a valid Let's Encrypt-like CA cert for Master Panel (zz.vponlive.com) and bind it to Master Panel
@@ -4896,4 +4896,129 @@ test('40. v1.0.20 On-Demand Relay -> Exit Real Latency Probe E2E (POST /api/inbo
     await new Promise((r) => mockClashApi.close(r));
     await new Promise((r) => mockExitTcp.close(r));
   }
+});
+
+
+test('41. v1.0.21 3-Carrier TCP Block (Single-TCP GFW) 60s Probe & 20-Minute Dual-Trigger Auto-Failover + Anti-False-Positive & Anti-Bounce Failback', async () => {
+  const { handleAgentHeartbeat } = require('../lib/cluster');
+
+  // 1. Create Standby S and Primary P ("DMIT-EB-120") with 20-minute auto-failover + tcpBlockFailover enabled
+  const stRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Standby-TCP-T41', role: 'standby', host: '195.58.149.21' })
+  });
+  assert.equal(stRes.status, 201);
+  const standby = stRes.json.node;
+
+  const pRes = await req('/SecPath16Chars99/api/cluster/nodes', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'DMIT-EB-120-T41',
+      role: 'relay',
+      host: '154.21.120.1',
+      domain: 'vm120.362353.xyz',
+      standbyNodeId: standby.id,
+      autoFailover: true,
+      autoFailoverMinutes: 20,
+      tcpBlockFailover: true,
+      autoFailback: true
+    })
+  });
+  assert.equal(pRes.status, 201);
+  const primary = pRes.json.node;
+
+  const t0 = Date.now();
+
+  // 2. Partial carrier loss (2 blocked, 1 OK) must NEVER trigger failover or start tcpBlockedSince timer
+  handleAgentHeartbeat(store, primary.id, primary.token, {
+    tcpProbe: {
+      at: new Date(t0).toISOString(),
+      results: [
+        { name: '深圳电信', host: 'gd-shenzhen-ct-v4.ip.zstaticcdn.com', port: 443, ok: false, ms: -1 },
+        { name: '广东联通', host: 'gd-cu-v4.ip.zstaticcdn.com', port: 80, ok: false, ms: -1 },
+        { name: '广东移动', host: 'gd-cm-v4.ip.zstaticcdn.com', port: 80, ok: true, ms: 26 }
+      ],
+      blockedCount: 2,
+      allBlocked: false
+    }
+  });
+  let pObj = store.state.nodes.find((n) => n.id === primary.id);
+  assert.equal(pObj.tcpBlockedSince, '', 'Partial carrier loss must NOT start tcpBlockedSince');
+
+  // 3. All 3 carriers blocked (单 TCP 墙 / 三网断流) starts at t0, while VPS itself remains 100% ONLINE!
+  const allBlockedProbe = (ts) => ({
+    at: new Date(ts).toISOString(),
+    results: [
+      { name: '深圳电信', host: 'gd-shenzhen-ct-v4.ip.zstaticcdn.com', port: 443, ok: false, ms: -1 },
+      { name: '广东联通', host: 'gd-cu-v4.ip.zstaticcdn.com', port: 80, ok: false, ms: -1 },
+      { name: '广东移动', host: 'gd-cm-v4.ip.zstaticcdn.com', port: 80, ok: false, ms: -1 }
+    ],
+    blockedCount: 3,
+    allBlocked: true
+  });
+  handleAgentHeartbeat(store, primary.id, primary.token, { tcpProbe: allBlockedProbe(t0) });
+
+  // At T + 19 minutes: machine is online and blocked for 19 min (< 20 min) -> must NOT failover yet!
+  const hc19 = await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: t0 + 19 * 60 * 1000, skipActiveProbe: true })
+  });
+  assert.equal(hc19.status, 200);
+  pObj = store.state.nodes.find((n) => n.id === primary.id);
+  assert.equal(pObj.activeFailoverTo, '', 'At 19 minutes of 3-carrier block, must NOT failover before 20-minute threshold');
+
+  // At T + 20 minutes: machine is STILL online (recent heartbeat!), but 3-carrier TCP block reached 20 minutes -> MUST auto-failover!
+  store.transact((st) => {
+    const n = st.nodes.find((x) => x.id === primary.id);
+    n.lastSeenAt = new Date(t0 + 20 * 60 * 1000 - 5000).toISOString();
+    n.status = 'online';
+  });
+  const hc20 = await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: t0 + 20 * 60 * 1000, skipActiveProbe: true })
+  });
+  assert.equal(hc20.status, 200);
+  const tcpAction = (hc20.json.actions || []).find((a) => a.type === 'relay_tcp_block_failover' && a.nodeId === primary.id);
+  assert.ok(tcpAction, 'At 20 minutes of 3-carrier TCP block, relay_tcp_block_failover must trigger automatically');
+  pObj = store.state.nodes.find((n) => n.id === primary.id);
+  assert.equal(pObj.activeFailoverTo, standby.id, 'Primary must now be failed over to Standby');
+
+  // 4. Anti-Bounce Guard: Even though machine is online, while allBlocked is still true, autoFailback must NOT bounce back!
+  store.transact((st) => {
+    const n = st.nodes.find((x) => x.id === primary.id);
+    n.status = 'online';
+    n.lastSeenAt = new Date(t0 + 21 * 60 * 1000 - 3000).toISOString();
+  });
+  const hcStillBlocked = await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: t0 + 21 * 60 * 1000, skipActiveProbe: true })
+  });
+  pObj = store.state.nodes.find((n) => n.id === primary.id);
+  assert.equal(pObj.activeFailoverTo, standby.id, 'Must NOT auto-failback while 3-carrier TCP is still blocked');
+
+  // 5. Once GFW unblocks (3 carriers recover), autoFailback cleanly switches back to Primary!
+  handleAgentHeartbeat(store, primary.id, primary.token, {
+    tcpProbe: {
+      at: new Date(t0 + 22 * 60 * 1000).toISOString(),
+      results: [
+        { name: '深圳电信', host: 'gd-shenzhen-ct-v4.ip.zstaticcdn.com', port: 443, ok: true, ms: 19 },
+        { name: '广东联通', host: 'gd-cu-v4.ip.zstaticcdn.com', port: 80, ok: true, ms: 21 },
+        { name: '广东移动', host: 'gd-cm-v4.ip.zstaticcdn.com', port: 80, ok: true, ms: 24 }
+      ],
+      blockedCount: 0,
+      allBlocked: false
+    }
+  });
+  store.transact((st) => {
+    const n = st.nodes.find((x) => x.id === primary.id);
+    n.lastSeenAt = new Date(t0 + 22 * 60 * 1000).toISOString();
+  });
+  const hcRecovered = await req('/SecPath16Chars99/api/cluster/health-check', {
+    method: 'POST',
+    body: JSON.stringify({ nowMs: t0 + 22 * 60 * 1000 + 2000, skipActiveProbe: true })
+  });
+  assert.equal(hcRecovered.status, 200);
+  pObj = store.state.nodes.find((n) => n.id === primary.id);
+  assert.equal(pObj.activeFailoverTo, '', 'After 3-carrier TCP recovers, autoFailback must restore Primary');
+  assert.equal(pObj.tcpBlockedSince, '');
 });

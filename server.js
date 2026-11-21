@@ -85,7 +85,7 @@ const {
   restoreBackupCertificatesToDisk
 } = require('./lib/zip');
 
-const VERSION = '1.0.20';
+const VERSION = '1.0.21';
 const APP_ROOT = __dirname;
 const PUBLIC_DIR = path.join(APP_ROOT, 'public');
 const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexusgate.json');
@@ -2828,7 +2828,8 @@ async function handleRequest(req, res) {
           mirrorStandby: body.mirrorStandby !== false && body.standbySyncMode !== 'on_failover',
           standbySyncMode: ['on_change', 'daily', 'on_failover'].includes(body.standbySyncMode) ? body.standbySyncMode : (body.mirrorStandby === false ? 'on_failover' : 'on_change'),
           autoFailover: body.autoFailover !== false,
-          autoFailoverMinutes: Math.max(1, Math.min(60, Number(body.autoFailoverMinutes || 3))),
+          autoFailoverMinutes: Math.max(1, Math.min(60, Number(body.autoFailoverMinutes || 20))),
+          tcpBlockFailover: body.tcpBlockFailover !== false,
           autoFailback: role === 'exit' ? body.autoFailback !== false : Boolean(body.autoFailback),
           fallbackExitNodeId: String(body.fallbackExitNodeId || '').trim(),
           activeFailoverTo: '',
@@ -2928,7 +2929,8 @@ async function handleRequest(req, res) {
           else if (existing.standbySyncMode === 'on_failover') existing.standbySyncMode = 'on_change';
         }
         if (body.autoFailover !== undefined) existing.autoFailover = Boolean(body.autoFailover);
-        if (body.autoFailoverMinutes !== undefined) existing.autoFailoverMinutes = Math.max(1, Math.min(60, Number(body.autoFailoverMinutes || 3)));
+        if (body.autoFailoverMinutes !== undefined) existing.autoFailoverMinutes = Math.max(1, Math.min(60, Number(body.autoFailoverMinutes || 20)));
+        if (body.tcpBlockFailover !== undefined) existing.tcpBlockFailover = Boolean(body.tcpBlockFailover);
         if (body.autoFailback !== undefined) existing.autoFailback = Boolean(body.autoFailback);
         if (body.fallbackExitNodeId !== undefined) existing.fallbackExitNodeId = String(body.fallbackExitNodeId).trim();
         if (body.status !== undefined && ['online', 'offline'].includes(body.status)) existing.status = body.status;
