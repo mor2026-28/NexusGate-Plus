@@ -263,7 +263,7 @@ function closeModal() {
 }
 
 
-function openConfirmModal(title, message, onConfirm) {
+function openConfirmModal(title, message, onConfirm, confirmLabel = '确定删除', btnClass = 'danger') {
   openModal(
     '⚠️ 操作确认',
     title,
@@ -272,7 +272,7 @@ function openConfirmModal(title, message, onConfirm) {
       <div class="notice warning" style="margin:0;font-size:13px;line-height:1.6">${esc(message)}</div>
       <div class="modal-actions" style="display:flex;justify-content:flex-end;gap:10px;margin-top:6px">
         <button type="button" data-action="close-modal">取消</button>
-        <button type="button" class="danger" id="ng-confirm-ok-btn">确定删除</button>
+        <button type="button" class="${esc(btnClass)}" id="ng-confirm-ok-btn">${esc(confirmLabel)}</button>
       </div>
     </div>
     `
@@ -288,7 +288,7 @@ function openConfirmModal(title, message, onConfirm) {
       } catch (err) {
         toast(err.message || '操作失败', true);
         okBtn.disabled = false;
-        okBtn.textContent = '确定删除';
+        okBtn.textContent = confirmLabel;
       }
     });
   }
@@ -530,7 +530,7 @@ function setPage(page) {
     guide: '容灾与集群教程'
   };
   $('#page-title').textContent = titles[page] || '控制台';
-  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.23 / ${titles[page] || ''}`;
+  $('#breadcrumb').textContent = `NexusGate Plus · v1.0.24 / ${titles[page] || ''}`;
   if (pageChanged) {
     state.search = '';
     window.scrollTo(0, 0);
@@ -618,7 +618,7 @@ function renderOverview() {
     <section class="cluster-hub-banner">
       <div class="cluster-hub-left">
         <div class="cluster-hub-title">
-          <span class="tag">NexusGate Plus v1.0.23</span>
+          <span class="tag">NexusGate Plus v1.0.24</span>
           <span>分布式中转与共享落地主控中心</span>
         </div>
         <p class="cluster-hub-desc">一主控统管全部中转机（各自独立域名）与无域名共享落地 SS 节点池；支持多台 3x-ui 数据无损归并，主力中转故障时一键切换备用机与 Cloudflare 解析 IP。</p>
@@ -870,6 +870,7 @@ function renderCluster() {
           <button data-action="preview-node-config" data-id="${esc(n.id)}">｛｝ 节点配置</button>
           ${!n.isLocal ? `<button data-copy="${esc(n.installCommand || '')}">📋 复制 Agent 命令</button>` : `<button data-action="Filter-node-inbounds" data-node="${esc(n.id)}">◫ 管理节点</button>`}
           ${(n.role === 'relay' || n.role === 'hybrid') && n.domain ? `<button data-action="test-node-cf" data-id="${esc(n.id)}" title="检测 Cloudflare API Token 是否能自动识别该域名与 Zone ID">🔍 测 CF 解析</button>` : ''}
+          ${!n.isLocal && (n.role === 'relay' || n.role === 'hybrid') && (n.inboundsCount || 0) > 0 ? `<button data-action="cluster-probe-node-inbounds" data-id="${esc(n.id)}" title="跳转到该中转机的入站列表并一键实测其下全部节点到落地的 TCP 与真连接延迟">⚡ 测全节点延迟</button>` : ''}
           ${!n.isLocal && (n.role === 'relay' || n.role === 'hybrid') ? `<button class="primary" data-action="open-replace-primary-modal" data-id="${esc(n.id)}" title="主力机恢复或新购主力机到位时，一键将当前顶替机的全部节点/规则/域名无缝移交新主力机，并将原机自动退居为共享热备机或原地替换 IP">🔄 主力接管 / 替换</button>` : ''}
           ${(n.role === 'relay' || n.role === 'hybrid') && !isFailedOver ? `<button class="warning" data-action="open-failover-modal" data-id="${esc(n.id)}">⚡ 一键容灾切换</button>` : ''}
           ${isFailedOver ? `<button class="success" data-action="trigger-failback" data-id="${esc(n.id)}">✓ 主力恢复回切</button>` : ''}
@@ -1308,14 +1309,21 @@ function renderInbounds() {
               ${(() => {
                 const rp = state.inboundRelayPings[item.id];
                 if (!rp) return '';
-                if (rp.pending) return '<span class="tag" style="font-size:11px">⏳ 实测中...</span>';
+                if (rp.pending) return '<span class="tag" style="font-size:11px">⏳ 测速中...</span>';
                 if (rp.ok) {
-                  const clr = rp.delayMs < 150 ? 'var(--success)' : (rp.delayMs < 380 ? 'var(--warning)' : 'var(--danger)');
-                  const bg = rp.delayMs < 150 ? 'var(--success-soft)' : (rp.delayMs < 380 ? 'var(--warning-soft)' : 'var(--danger-soft)');
-                  const modeTxt = rp.mode === 'real' ? '真连' : 'TCP';
-                  return `<span class="tag" style="font-size:11px;color:${clr};background:${bg};font-weight:750" title="从中转机 [${esc(rp.relayNodeName || '')}] 到落地的真实延迟">● ${rp.delayMs} ms (${modeTxt})</span>`;
+                  const hasTcp = Number(rp.tcpMs) > 0;
+                  const metricForColor = hasTcp ? rp.tcpMs : rp.delayMs;
+                  const clr = metricForColor < 100 ? 'var(--success)' : (metricForColor < 280 ? 'var(--warning)' : 'var(--danger)');
+                  const bg = metricForColor < 100 ? 'var(--success-soft)' : (metricForColor < 280 ? 'var(--warning-soft)' : 'var(--danger-soft)');
+                  const labelTxt = (rp.mode === 'real' && hasTcp)
+                    ? `● TCP ${rp.tcpMs}ms · 真连 ${rp.delayMs}ms`
+                    : `● ${rp.mode === 'real' ? '真连' : 'TCP'} ${rp.delayMs}ms`;
+                  const tipTxt = (rp.mode === 'real' && hasTcp)
+                    ? `中转机 [${rp.relayNodeName || ''}] ➔ 落地纯 TCP 延迟 ${rp.tcpMs}ms；经落地代理访问 Google 204 真连接延迟 ${rp.delayMs}ms（证明协议密码与落地出口 100% 畅通）`
+                    : `中转机 [${rp.relayNodeName || ''}] ➔ 落地延迟 ${rp.delayMs}ms`;
+                  return `<span class="tag" style="font-size:11px;color:${clr};background:${bg};font-weight:750" title="${esc(tipTxt)}">${labelTxt}</span>`;
                 }
-                const shortErr = rp.mode === 'real_failed_tcp_ok' ? `✕ 握手失败 (TCP ${rp.tcpMs}ms)` : '✕ 不通';
+                const shortErr = rp.mode === 'real_failed_tcp_ok' ? `✕ TCP ${rp.tcpMs}ms · 握手失败` : '✕ TCP不通';
                 return `<span class="tag" style="font-size:11px;color:var(--danger);background:var(--danger-soft);font-weight:750" title="${esc(rp.error || '连接失败')}">${shortErr}</span>`;
               })()}
             </div>
@@ -1384,6 +1392,7 @@ function renderInbounds() {
         <button data-copy="${esc(`${subAllUrl}?format=clash`)}">⚡ 复制 Clash 订阅</button>
         <button data-action="copy-all-links">📋 复制全部节点链接</button>
         <button data-action="batch-inbounds" data-batch="enable-all">✓ 批量启用</button>
+        <button class="success" data-action="probe-scope-inbounds" ${state._batchProbing ? 'disabled' : ''} title="并发限流(4线程)+同出站去重，一键实测当前列表所有节点的中转机➔落地 TCP 与真连接延迟">${state._batchProbing ? `⏳ 批量测速中 (${state._batchProbeDone || 0}/${state._batchProbeTotal || 0})...` : (scopeLabel ? `⚡ 一键测 [${esc(scopeLabel)}] 全部延迟 (${filtered.filter((x) => x.protocol !== 'direct').length})` : `⚡ 一键测当前全部延迟 (${filtered.filter((x) => x.protocol !== 'direct').length})`)}</button>
         <button data-action="batch-inbounds" data-batch="reset-all-traffic">↻ 批量重置流量</button>
       </div>
     </div>
@@ -3043,6 +3052,64 @@ function renderGuide() {
       </div>
     </section>
   `;
+}
+
+
+async function runBatchRelayProbe(targetInbounds, labelName = "当前列表") {
+  const list = (targetInbounds || []).filter((x) => x && x.protocol !== "direct");
+  if (!list.length) {
+    toast("当前列表暂无可测速的入站节点", true);
+    return;
+  }
+  if (state._batchProbing) return;
+  state._batchProbing = true;
+  state._batchProbeDone = 0;
+  state._batchProbeTotal = list.length;
+
+  // Group identical (nodeId, outboundTag) pairs so shared outbounds on the same Relay are probed only ONCE!
+  const groups = new Map();
+  for (const item of list) {
+    state.inboundRelayPings[item.id] = { pending: true };
+    const key = `${item.nodeId || "node_local"}::${item.outboundTag || "default"}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  render();
+
+  const groupEntries = [...groups.values()];
+  let okCount = 0;
+  let failCount = 0;
+  let cursor = 0;
+  const CONCURRENCY = 4;
+
+  const worker = async () => {
+    while (cursor < groupEntries.length) {
+      const idx = cursor++;
+      const items = groupEntries[idx];
+      const rep = items[0];
+      let res;
+      try {
+        res = await api(`/api/inbounds/${encodeURIComponent(rep.id)}/probe-relay`, { method: "POST" });
+      } catch (err) {
+        res = { ok: false, error: err.message };
+      }
+      for (const it of items) {
+        state.inboundRelayPings[it.id] = res;
+        state._batchProbeDone += 1;
+        if (res.ok) okCount += 1;
+        else failCount += 1;
+      }
+      render();
+    }
+  };
+
+  try {
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, groupEntries.length) }, () => worker()));
+    toast(`✅ [${labelName}] 批量测速完成：${okCount}/${list.length} 畅通${failCount > 0 ? `，${failCount} 个异常` : ""}`, failCount > 0 && okCount === 0);
+  } finally {
+    state._batchProbing = false;
+    render();
+  }
 }
 
 function render() {
@@ -5181,12 +5248,36 @@ document.addEventListener('click', async (e) => {
       if (node) openClusterNodeModal(node, node.role || 'relay');
     }
     else if (action === 'delete-cluster-node') {
-      if (!ngConfirm('确认从集群中移除该服务器节点吗？')) return;
-      await api(`/api/cluster/nodes/${encodeURIComponent(actEl.dataset.id)}`, { method: 'DELETE' });
-      state.nodes = (state.nodes || []).filter((x) => x.id !== actEl.dataset.id);
-      toast('已移除集群服务器节点');
-      render();
-      load(state.page, { silent: true });
+      const nodeId = actEl.dataset.id;
+      const targetNode = getClusterNodesList().find((x) => x.id === nodeId);
+      const nodeName = targetNode ? targetNode.name : nodeId;
+      const nodeAddr = targetNode ? (targetNode.domain || targetNode.host || '') : '';
+      const nodeInbCount = targetNode ? (targetNode.inboundsCount ?? (state.inbounds || []).filter((i) => (i.nodeId || 'node_local') === nodeId).length) : 0;
+      const roleText = targetNode?.role === 'exit' ? '落地机' : (targetNode?.role === 'standby' ? '热备容灾机' : '中转机');
+      openConfirmModal(
+        `确认删除${roleText} [${nodeName}] 吗？`,
+        `即将从集群永久移除${roleText}「${nodeName}」(${nodeAddr})，当前该机承载 ${nodeInbCount} 个入站节点。删除后不可撤销（若旧机器不再使用，请按需在 SSH 卸载 Agent）。确定要删除吗？`,
+        async () => {
+          await api(`/api/cluster/nodes/${encodeURIComponent(nodeId)}`, { method: 'DELETE' });
+          state.nodes = (state.nodes || []).filter((x) => x.id !== nodeId);
+          toast(`已删除${roleText} [${nodeName}]`);
+          render();
+          load(state.page, { silent: true });
+        }
+      );
+    }
+    else if (action === 'cluster-probe-node-inbounds') {
+      const nodeId = actEl.dataset.id;
+      const targetNode = getClusterNodesList().find((x) => x.id === nodeId);
+      state.nodeFilter = nodeId;
+      state.protoFilter = 'all';
+      state.search = '';
+      setPage('inbounds');
+      if (!state.inbounds.length) {
+        await load('inbounds', { silent: true });
+      }
+      const items = (state.inbounds || []).filter((i) => (i.nodeId || 'node_local') === nodeId);
+      runBatchRelayProbe(items, targetNode ? targetNode.name : '该服务器');
     }
     else if (action === 'sync-cluster-node') {
       const res = await api(`/api/cluster/nodes/${encodeURIComponent(actEl.dataset.id)}/sync`, { method: 'POST' });
@@ -5518,6 +5609,40 @@ document.addEventListener('click', async (e) => {
       toast('出站流量统计已清零');
       load('outbounds');
     }
+    else if (action === 'probe-scope-inbounds') {
+      const q = state.search.toLowerCase();
+      const pf = state.protoFilter || 'all';
+      const nf = state.nodeFilter || 'all';
+      const list = (state.inbounds || []).filter((item) => {
+        if (item.protocol === 'direct') return false;
+        if (nf !== 'all' && (item.nodeId || 'node_local') !== nf) return false;
+        if (pf !== 'all') {
+          if (pf === 'relay') {
+            const hasRelay = (item.outboundTag && item.outboundTag !== 'default' && item.outboundTag !== 'direct');
+            if (!hasRelay) return false;
+          } else if (pf === 'socks') {
+            if (!['socks', 'mixed', 'http'].includes(item.protocol)) return false;
+          } else if (item.protocol !== pf) {
+            return false;
+          }
+        }
+        if (!q) return true;
+        return [item.remark, item.tag, item.protocol, item.port, item.outboundTag].join(' ').toLowerCase().includes(q);
+      });
+      const selNode = nf !== 'all' ? getClusterNodesList().find((n) => n.id === nf) : null;
+      const labelName = selNode ? selNode.name.replace(/\s*\(Local Master\)/, '') : '当前全部节点';
+      if (list.length > 40) {
+        openConfirmModal(
+          `确认批量测速 ${list.length} 个节点吗？`,
+          `当前选中了「${labelName}」共 ${list.length} 个节点，将自动按 4 线程限流并去重测速（建议先点击上方单台服务器标签逐台测速更快）。是否立即开始？`,
+          async () => { runBatchRelayProbe(list, labelName); },
+          '立即开始测速',
+          'primary'
+        );
+      } else {
+        runBatchRelayProbe(list, labelName);
+      }
+    }
     else if (action === 'probe-inbound-relay') {
       const id = actEl.dataset.id;
       if (!id) return;
@@ -5530,7 +5655,7 @@ document.addEventListener('click', async (e) => {
         const rName = (res.relayNodeName || '中转机').replace(/\s*\(Local Master\)/, '');
         const oName = res.outboundRemark || res.outboundTag || '直连';
         if (res.ok) {
-          toast(`✅ [${rName}] ➔ [${oName}] ${res.mode === 'real' ? '真连接' : 'TCP'}延迟: ${res.delayMs} ms`);
+          toast(`✅ [${rName}] ➔ [${oName}] ${res.tcpMs ? `TCP ${res.tcpMs}ms · ` : ''}${res.mode === 'real' ? '真连' : 'TCP'} ${res.delayMs}ms`);
         } else {
           toast(`❌ [${rName}] ➔ [${oName}] ${res.error || '不通'}`, true);
         }

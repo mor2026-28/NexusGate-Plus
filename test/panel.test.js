@@ -4008,7 +4008,7 @@ test('34. v1.0.14 Remote Relay (vm备用 / dmit 120dao) Migration Isolation, Mas
 
     const jsRes = await req(`${prefix}/api/cluster/nexus-agent.js`);
     assert.equal(jsRes.status, 200);
-    assert.ok(jsRes.text.includes('1.0.23'), 'nexus-agent.js must be v1.0.23');
+    assert.ok(jsRes.text.includes('1.0.24'), 'nexus-agent.js must be v1.0.24');
   }
 
   // 2. Issue a valid Let's Encrypt-like CA cert for Master Panel (zz.vponlive.com) and bind it to Master Panel
@@ -5120,4 +5120,48 @@ test('42. v1.0.23 Real Agent runThreeCarrierTcpProbe -> sendHeartbeat -> Master 
     await new Promise((r) => srvCt.close(r));
     await new Promise((r) => srvCu.close(r));
   }
+});
+
+
+test('43. v1.0.24 Parallel TCP + Real 204 Dual-Latency Probe (tcpMs + delayMs) & Full Master .zip Backup Completeness (Nodes + Inbounds + SubGroups + Certs)', async () => {
+  const httpMod = require('node:http');
+  const netMod = require('node:net');
+  const { handleProbeOutbound } = require('../agent/nexus-agent');
+  const { buildMasterBackupZip, extractMasterBackupPayload } = require('../lib/zip');
+
+  // 1. Verify handleProbeOutbound returns BOTH pure Relay -> Exit TCP latency (tcpMs) AND Real 204 proxy latency (delayMs)
+  const mockExit = netMod.createServer((s) => s.end());
+  await new Promise((r) => mockExit.listen(0, '127.0.0.1', r));
+  const exitPort = mockExit.address().port;
+
+  const mockClash = httpMod.createServer((reqObj, resObj) => {
+    resObj.writeHead(200, { 'Content-Type': 'application/json' });
+    resObj.end(JSON.stringify({ delay: 42 }));
+  });
+  await new Promise((r) => mockClash.listen(0, '127.0.0.1', r));
+  const clashPort = mockClash.address().port;
+
+  try {
+    const res = await handleProbeOutbound(
+      { outboundTag: 'HKT-SS-10121', server: '127.0.0.1', port: exitPort, timeoutMs: 3000 },
+      { clashPort, clashSecret: '' }
+    );
+    assert.equal(res.ok, true);
+    assert.equal(res.mode, 'real');
+    assert.equal(res.delayMs, 42, 'Must return Real 204 proxy delayMs');
+    assert.ok(typeof res.tcpMs === 'number' && res.tcpMs >= 1 && res.tcpMs < 50, `Must also return pure Relay -> Exit TCP latency tcpMs (got ${res.tcpMs})`);
+  } finally {
+    await new Promise((r) => mockClash.close(r));
+    await new Promise((r) => mockExit.close(r));
+  }
+
+  // 2. Verify buildMasterBackupZip preserves 100% of nodes, inbounds, outbounds, routing, subGroups, externalNodes, and certificates
+  const zipBuf = buildMasterBackupZip(store, singbox, '1.0.24');
+  const extracted = extractMasterBackupPayload(zipBuf);
+  assert.ok(extracted && extracted.stateData, 'Extracted backup must contain full stateData');
+  assert.equal(extracted.stateData.nodes.length, store.state.nodes.length, 'All cluster servers must be backed up');
+  assert.equal(extracted.stateData.inbounds.length, store.state.inbounds.length, 'All inbounds must be backed up');
+  assert.equal(extracted.stateData.outbounds.length, store.state.outbounds.length, 'All outbounds must be backed up');
+  assert.equal((extracted.stateData.subGroups || []).length, (store.state.subGroups || []).length, 'All custom subscriptions (subGroups) must be backed up');
+  assert.equal((extracted.stateData.externalNodes || []).length, (store.state.externalNodes || []).length, 'All external nodes must be backed up');
 });

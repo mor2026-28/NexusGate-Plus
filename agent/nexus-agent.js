@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.23)
+ * NexusGate Plus · Ultra-Lightweight Cluster Agent (v1.0.24)
  * Zero external npm dependencies · < 15 MB RAM footprint
  * Supports Relay Node, Exit Node (SS/SS2022/VMess), and Hot-Standby Failover Node.
  * Features:
@@ -27,7 +27,7 @@ const https = require('node:https');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 
-const AGENT_VERSION = '1.0.23';
+const AGENT_VERSION = '1.0.24';
 const ACTIVE_LEASE_TTL_MS = 60000;
 const EXCESS_IP_BLOCK_TTL_MS = 60000;
 
@@ -1258,13 +1258,25 @@ async function handleProbeOutbound(payload = {}, customCfg = cfg) {
   if (outboundTag === "block") {
     return { ok: false, mode: "blocked", error: "当前出站为 block (黑洞拦截)" };
   }
-  const realRes = await probeClashProxyDelay(outboundTag, timeoutMs, customCfg);
+
+  // Run pure Relay -> Exit TCP RTT AND Clash API real 204 proxy handshake IN PARALLEL
+  const [realRes, tcpRes] = await Promise.all([
+    probeClashProxyDelay(outboundTag, timeoutMs, customCfg),
+    (server && port > 0)
+      ? probeTcpConnect(server, port, Math.min(3000, timeoutMs))
+      : Promise.resolve(null)
+  ]);
+
   if (realRes.ok) {
-    return { ok: true, mode: "real", delayMs: realRes.delayMs, outboundTag };
+    return {
+      ok: true,
+      mode: "real",
+      delayMs: realRes.delayMs,
+      ...(tcpRes && tcpRes.ok ? { tcpMs: tcpRes.tcpMs } : {}),
+      outboundTag
+    };
   }
-  // If real proxy test failed, run a lightweight TCP connect from this Relay to Exit server:port for exact diagnostics
-  if (server && port > 0) {
-    const tcpRes = await probeTcpConnect(server, port, Math.min(3000, timeoutMs));
+  if (tcpRes) {
     if (tcpRes.ok) {
       return {
         ok: false,
@@ -1284,7 +1296,7 @@ async function handleProbeOutbound(payload = {}, customCfg = cfg) {
   if (outboundTag === "direct") {
     const directTcp = await probeTcpConnect("1.1.1.1", 443, 3000);
     if (directTcp.ok) {
-      return { ok: true, mode: "tcp", delayMs: directTcp.tcpMs, outboundTag };
+      return { ok: true, mode: "tcp", delayMs: directTcp.tcpMs, tcpMs: directTcp.tcpMs, outboundTag };
     }
   }
   return { ok: false, mode: "real_failed", outboundTag, error: realRes.error || "真连接测速失败" };
